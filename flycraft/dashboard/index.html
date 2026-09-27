@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlyCraft ダッシュボード</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --line: #2a3242;
+    --text: #e6edf3; --muted: #8b98a9; --accent: #ffb454; --good: #5fe07a;
+    --bad: #ff6b6b; --blue: #58a6ff; --bar: #2d3748;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f6fa; --panel: #ffffff; --panel2: #f0f3f8; --line: #d9dee7;
+      --text: #1b2330; --muted: #5d6b7e; --accent: #d9831a; --bar: #e3e8ef; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .02em; }
+  header h1 span { color: var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 10px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .chip b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  main { display: grid; gap: 14px; padding: 14px 16px 24px;
+    grid-template-columns: repeat(12, minmax(0, 1fr)); max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px; min-width: 0; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600;
+    letter-spacing: .03em; display: flex; justify-content: space-between; gap: 8px; }
+  .card h2 small { font-weight: 400; }
+  .c-game { grid-column: span 5; } .c-eye { grid-column: span 4; } .c-act { grid-column: span 3; }
+  .c-brain { grid-column: span 8; } .c-senses { grid-column: span 4; }
+  .c-opto { grid-column: span 5; } .c-map { grid-column: span 4; } .c-events { grid-column: span 3; }
+  @media (max-width: 1100px) {
+    .c-game, .c-eye, .c-act, .c-brain, .c-senses, .c-opto, .c-map, .c-events { grid-column: span 12; }
+  }
+  canvas { width: 100%; display: block; image-rendering: pixelated; border-radius: 8px;
+    background: #000; }
+  #brain { image-rendering: auto; background: #05070b; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: 0; }
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+  .key { border: 1px solid var(--line); background: var(--panel2); border-radius: 8px; text-align: center;
+    padding: 6px 2px; font-weight: 700; color: var(--muted); transition: background .08s, color .08s; }
+  .key small { display: block; font-weight: 400; font-size: 11px; }
+  .key.on { background: var(--accent); color: #111; border-color: var(--accent); }
+  .key.space { grid-column: span 3; }
+  .rows { display: grid; gap: 5px; }
+  .row { display: grid; grid-template-columns: 7.5em 1fr 3.4em; gap: 8px; align-items: center; font-size: 12px; }
+  .row .name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .val { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: 9px; background: var(--bar); border-radius: 5px; overflow: hidden; position: relative; }
+  .bar > div { height: 100%; background: var(--blue); width: 0; transition: width .12s; }
+  .bar.lr { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: none; }
+  .bar.lr > div { background: var(--bar); border-radius: 5px; width: auto; position: relative; overflow: hidden; }
+  .bar.lr span { position: absolute; top: 0; bottom: 0; background: var(--accent); }
+  .bar.lr > div:first-child span { right: 0; }
+  .bar.lr > div:last-child span { left: 0; }
+  .opto { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  button { font: inherit; font-size: 12px; color: var(--text); background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; cursor: pointer; text-align: left; }
+  button:hover { border-color: var(--blue); }
+  button.on { background: #3a2a10; border-color: var(--accent); color: var(--accent); }
+  @media (prefers-color-scheme: light) { button.on { background: #fff1dc; } }
+  .ctrl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .ctrl label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 140px; }
+  .sub { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+  .events { font-size: 12px; margin: 0; padding-left: 1.1em; color: var(--text); }
+  .events li { margin: 2px 0; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kv { font-size: 12px; color: var(--muted); display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 8px; }
+  .kv b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .err { color: var(--bad); font-size: 12px; }
+  .note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🪰 <span>FlyCraft</span> — ハエの脳がマインクラフトをプレイ</h1>
+  <div class="chips">
+    <span class="chip">接続 <b id="st-backend">-</b></span>
+    <span class="chip">脳 <b id="st-brain">-</b></span>
+    <span class="chip">脳の時間 <b id="st-t">0</b> s</span>
+    <span class="chip">速度 <b id="st-rt">-</b> × 実時間</span>
+    <span class="chip">ループ <b id="st-hz">-</b> Hz</span>
+    <span class="chip">スパイク <b id="st-sp">0</b> /tick</span>
+    <span class="chip">発火中 <b id="st-act">0</b> 個</span>
+  </div>
+  <div class="err" id="st-err"></div>
+</header>
+<main>
+  <section class="card c-game">
+    <h2>ゲーム画面 <small id="game-info"></small></h2>
+    <canvas id="game" width="240" height="135"></canvas>
+  </section>
+
+  <section class="card c-eye">
+    <h2>ハエの複眼像 <small id="eye-info"></small></h2>
+    <canvas id="eye" width="340" height="230" style="background:#000"></canvas>
+    <div class="two" style="margin-top:8px">
+      <div><div class="sub">運動検出（T4/T5 相当）</div><canvas id="motion" width="34" height="23"></canvas></div>
+      <div><div class="sub">VPN の駆動（特徴別の平均）</div><div class="rows" id="vpn"></div></div>
+    </div>
+  </section>
+
+  <section class="card c-act">
+    <h2>体の動き（下行性ニューロン）</h2>
+    <div class="keys">
+      <div class="key" id="k-left">A<small>左旋回</small></div>
+      <div class="key" id="k-fwd">W<small>前進</small></div>
+      <div class="key" id="k-right">D<small>右旋回</small></div>
+      <div class="key" id="k-bite">🖱<small>噛む</small></div>
+      <div class="key" id="k-back">S<small>後退</small></div>
+      <div class="key" id="k-none">・<small>静止</small></div>
+      <div class="key space" id="k-jump">Space <small>逃避ジャンプ（巨大繊維）</small></div>
+    </div>
+    <div class="rows" id="motor"></div>
+    <div class="kv">
+      <span>空腹度</span><b id="hunger">-</b>
+      <span>体力</span><b id="health">-</b>
+    </div>
+  </section>
+
+  <section class="card c-brain">
+    <h2>全脳の活動 <small id="brain-info">読み込み中…</small></h2>
+    <canvas id="brain" width="900" height="420"></canvas>
+    <div class="legend" id="legend"></div>
+    <div class="note">正面から見た脳。点 1 つがニューロン 1 個（FlyWire の座標）。直近 0.25 秒に発火したものが光ります。</div>
+  </section>
+
+  <section class="card c-senses">
+    <h2>感覚入力</h2>
+    <div class="rows" id="senses"></div>
+    <h2 style="margin-top:14px">発火中のニューロン（分類別）</h2>
+    <div class="rows" id="classes"></div>
+  </section>
+
+  <section class="card c-opto">
+    <h2>光遺伝学（in silico）<small>押すとそのニューロン群を刺激／抑制</small></h2>
+    <div class="opto" id="opto"></div>
+    <div class="ctrl">
+      <label>空腹度 <input type="range" id="hunger-in" min="0" max="1" step="0.05"></label>
+      <button id="pause">⏸ 一時停止</button>
+      <button id="reset-brain">脳をリセット</button>
+      <button id="reset-world">世界をリセット</button>
+    </div>
+  </section>
+
+  <section class="card c-map">
+    <h2>世界マップ <small id="map-info"></small></h2>
+    <canvas id="map" width="288" height="288" style="max-width:320px;margin:auto"></canvas>
+    <div class="kv" id="gstats"></div>
+  </section>
+
+  <section class="card c-events">
+    <h2>できごと</h2>
+    <ul class="events" id="events"></ul>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const b64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const b64i16 = (s) => new Int16Array(b64(s).buffer);
+const b64i32 = (s) => new Int32Array(b64(s).buffer);
+const post = (msg) => fetch('/api/control', {method: 'POST', body: JSON.stringify(msg)});
+const hex = (h) => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+
+let layout = null, baseImg = null, cls = null, px = null, py = null, colors = null;
+let paused = false, minimapImg = null, mapSize = 96, optoState = {};
+
+function rowsInto(el, items) {
+  // items: [key, label, value(0..1), text]
+  if (el.children.length !== items.length) {
+    el.innerHTML = items.map(([k, l]) =>
+      `<div class="row" data-k="${k}"><span class="name" title="${l}">${l}</span><div class="bar"><div></div></div><span class="val"></span></div>`).join('');
+  }
+  items.forEach(([k, l, v, t], i) => {
+    const r = el.children[i];
+    r.querySelector('.bar > div').style.width = Math.max(0, Math.min(1, v)) * 100 + '%';
+    r.querySelector('.val').textContent = t;
+  });
+}
+
+async function loadBrain() {
+  layout = await (await fetch('/api/brain')).json();
+  const c = $('brain'); c.width = layout.w; c.height = layout.h;
+  px = b64i16(layout.x); py = b64i16(layout.y); cls = b64(layout.cls);
+  colors = layout.colors.map(hex);
+  const ctx = c.getContext('2d');
+  baseImg = ctx.createImageData(layout.w, layout.h);
+  const d = baseImg.data;
+  for (let i = 3; i < d.length; i += 4) d[i] = 255;
+  for (let i = 0; i < layout.n; i++) {
+    if (px[i] < 0) continue;
+    const o = (py[i] * layout.w + px[i]) * 4, col = colors[cls[i]];
+    d[o] = Math.min(255, d[o] + col[0] * 0.06 + 3);
+    d[o+1] = Math.min(255, d[o+1] + col[1] * 0.06 + 3);
+    d[o+2] = Math.min(255, d[o+2] + col[2] * 0.06 + 4);
+  }
+  $('brain-info').textContent = `${layout.name}: ${layout.n.toLocaleString()} ニューロン`;
+  $('legend').innerHTML = layout.classes.map((k, i) => `<span><i style="background:${layout.colors[i]}"></i>${k || 'unknown'}</span>`).join('');
+  $('opto').innerHTML = Object.entries(layout.opto).map(([k, l]) => `<button data-g="${k}">${l}</button>`).join('');
+  $('opto').querySelectorAll('button').forEach(b => b.onclick = () => {
+    const g = b.dataset.g; post({type: 'opto', group: g, value: !optoState[g]});
+  });
+}
+
+function drawBrain(s) {
+  if (!layout) return;
+  const ctx = $('brain').getContext('2d');
+  const img = new ImageData(new Uint8ClampedArray(baseImg.data), layout.w, layout.h);
+  const d = img.data, w = layout.w;
+  const idx = b64i32(s.act_idx), val = b64(s.act_val);
+  for (let k = 0; k < idx.length; k++) {
+    const i = idx[k];
+    if (px[i] < 0) continue;
+    const a = Math.min(1, 0.25 + val[k] / 120), col = colors[cls[i]];
+    for (const [dx, dy] of [[0,0],[1,0],[0,1],[1,1]]) {
+      const x = px[i] + dx, y = py[i] + dy;
+      if (x >= w || y >= layout.h) continue;
+      const o = (y * w + x) * 4;
+      d[o] = Math.max(d[o], col[0] * a); d[o+1] = Math.max(d[o+1], col[1] * a); d[o+2] = Math.max(d[o+2], col[2] * a);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  // 運動出力ニューロンを強調
+  ctx.lineWidth = 1.5;
+  for (const [key, ids] of Object.entries(layout.motor)) {
+    const r = (s.motor || {})[key] || 0;
+    for (const i of ids) {
+      if (px[i] < 0) continue;
+      ctx.strokeStyle = r > 1 ? '#ffb454' : 'rgba(255,180,84,0.35)';
+      ctx.beginPath(); ctx.arc(px[i], py[i], 4 + Math.min(8, r / 6), 0, 7); ctx.stroke();
+    }
+  }
+}
+
+function drawRGB(canvas, w, h, rgb) {
+  const bytes = b64(rgb);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  for (let i = 0, j = 0; i < w * h; i++, j += 3) {
+    img.data[i*4] = bytes[j]; img.data[i*4+1] = bytes[j+1]; img.data[i*4+2] = bytes[j+2]; img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function drawEye(e) {
+  const c = $('eye'), ctx = c.getContext('2d');
+  const bytes = b64(e.rgb), W = e.w, H = e.h;
+  const r = Math.min(c.width / (W + 0.5), c.height / (H * 0.87 + 0.5)) / 2;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, c.width, c.height);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const j = (y * W + x) * 3;
+    ctx.fillStyle = `rgb(${bytes[j]},${bytes[j+1]},${bytes[j+2]})`;
+    ctx.beginPath();
+    ctx.arc(r + x * 2 * r + (y % 2) * r, r + y * 1.74 * r, r * 0.92, 0, 7);
+    ctx.fill();
+  }
+  $('eye-info').textContent = `${W}×${H} 個眼`;
+}
+
+function drawMotion(m, w, h) {
+  const c = $('motion'); if (c.width !== w) { c.width = w; c.height = h; }
+  const bytes = b64(m), ctx = c.getContext('2d'), img = ctx.createImageData(w, h);
+  for (let i = 0; i < w * h; i++) {
+    const v = bytes[i];
+    img.data[i*4] = v; img.data[i*4+1] = v * 0.7; img.data[i*4+2] = 255 - v * 0.6; img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+async function loadMap() {
+  const r = await fetch('/api/minimap');
+  if (!r.ok) { $('map').parentElement.style.display = 'none'; return; }
+  const m = await r.json();
+  mapSize = m.size;
+  const off = document.createElement('canvas'); off.width = m.w; off.height = m.h;
+  const bytes = b64(m.rgb), ctx = off.getContext('2d'), img = ctx.createImageData(m.w, m.h);
+  for (let i = 0; i < m.w * m.h; i++) {
+    img.data[i*4] = bytes[i*3]; img.data[i*4+1] = bytes[i*3+1]; img.data[i*4+2] = bytes[i*3+2]; img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  minimapImg = off;
+}
+
+function drawMap(s) {
+  if (!minimapImg || !s.player) return;
+  const c = $('map'), ctx = c.getContext('2d'), k = c.width / mapSize;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(minimapImg, 0, 0, c.width, c.height);
+  for (const sl of s.slimes || []) {
+    ctx.fillStyle = '#7dff7d'; ctx.strokeStyle = '#063'; ctx.beginPath();
+    ctx.arc(sl.x * k, sl.z * k, 4, 0, 7); ctx.fill(); ctx.stroke();
+  }
+  const p = s.player, a = p.yaw * Math.PI / 180;
+  const fx = Math.sin(a), fz = Math.cos(a);
+  ctx.fillStyle = '#ffb454'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(p.x * k + fx * 9, p.z * k + fz * 9);
+  ctx.lineTo(p.x * k - fx * 5 + fz * 5, p.z * k - fz * 5 - fx * 5);
+  ctx.lineTo(p.x * k - fx * 5 - fz * 5, p.z * k - fz * 5 + fx * 5);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+function render(s) {
+  $('st-backend').textContent = s.backend || '-';
+  $('st-brain').textContent = layout ? layout.name : '-';
+  $('st-t').textContent = (s.brain_t ?? 0).toFixed(1);
+  $('st-rt').textContent = s.realtime ?? '-';
+  $('st-hz').textContent = s.loop_hz ?? '-';
+  $('st-sp').textContent = (s.spikes ?? 0).toLocaleString();
+  $('st-act').textContent = (s.active ?? 0).toLocaleString();
+  $('st-err').textContent = s.error || '';
+  if (s.frame) drawRGB($('game'), s.frame.w, s.frame.h, s.frame.rgb);
+  if (s.eye) { drawEye(s.eye); if (s.motion) drawMotion(s.motion, s.eye.w, s.eye.h); }
+  if (s.info) {
+    const i = s.info;
+    $('game-info').textContent = i.x !== undefined ? `x ${(+i.x).toFixed(1)}  y ${(+i.y).toFixed(1)}  z ${(+i.z).toFixed(1)}` : '';
+    $('health').textContent = i.health !== undefined ? `${i.health} / 20` : '-';
+  }
+  const a = s.action || {};
+  $('k-fwd').classList.toggle('on', a.forward > 0.15);
+  $('k-back').classList.toggle('on', a.forward < -0.15);
+  $('k-left').classList.toggle('on', a.turn > 0.15);
+  $('k-right').classList.toggle('on', a.turn < -0.15);
+  $('k-jump').classList.toggle('on', !!a.jump);
+  $('k-bite').classList.toggle('on', !!a.attack);
+  $('k-none').classList.toggle('on', Math.abs(a.forward || 0) <= 0.15 && Math.abs(a.turn || 0) <= 0.15);
+  const m = s.motor || {}, L = s.motor_labels || {};
+  const motorEl = $('motor');
+  const groups = ['forward', 'backward', 'steer', 'escape'];
+  if (motorEl.children.length !== groups.length + 1) {
+    motorEl.innerHTML = groups.map(g => `<div class="row"><span class="name" title="${L[g]}">${L[g]}</span><div class="bar lr"><div><span></span></div><div><span></span></div></div><span class="val"></span></div>`).join('')
+      + `<div class="row"><span class="name">${L.feed || '摂食'}</span><div class="bar"><div></div></div><span class="val"></span></div>`;
+  }
+  groups.forEach((g, i) => {
+    const l = m[g + '_left'] || 0, r = m[g + '_right'] || 0, row = motorEl.children[i];
+    const sp = row.querySelectorAll('.bar span');
+    sp[0].style.width = Math.min(100, l * 2) + '%'; sp[1].style.width = Math.min(100, r * 2) + '%';
+    row.querySelector('.val').textContent = `${l.toFixed(0)}|${r.toFixed(0)}`;
+  });
+  const fr = motorEl.children[groups.length];
+  fr.querySelector('.bar > div').style.width = Math.min(100, (m.feed_both || 0) * 5) + '%';
+  fr.querySelector('.val').textContent = (m.feed_both || 0).toFixed(1);
+  $('hunger').textContent = (s.hunger ?? 0).toFixed(2);
+  if (document.activeElement !== $('hunger-in')) $('hunger-in').value = s.hunger ?? 0.5;
+  const sv = s.senses || {}, sl = s.sense_labels || {};
+  rowsInto($('senses'), Object.keys(sl).map(k => [k, sl[k], sv[k] || 0, (sv[k] || 0).toFixed(2)]));
+  const cl = s.classes || {}, tot = Math.max(1, ...Object.values(cl));
+  rowsInto($('classes'), Object.entries(cl).sort((x, y) => y[1] - x[1]).slice(0, 8)
+    .map(([k, v]) => [k, k, v / tot, v.toLocaleString()]));
+  const vp = s.vpn || {};
+  rowsInto($('vpn'), Object.entries(vp).map(([k, v]) => [k, k, v / 60, v.toFixed(1)]));
+  optoState = s.opto || {};
+  document.querySelectorAll('#opto button').forEach(b => b.classList.toggle('on', !!optoState[b.dataset.g]));
+  paused = !!s.paused;
+  $('pause').textContent = paused ? '▶ 再開' : '⏸ 一時停止';
+  if (s.events) $('events').innerHTML = s.events.slice().reverse().map(e => `<li>${e}</li>`).join('');
+  if (s.game_stats) {
+    const g = s.game_stats, names = {distance: '移動距離', flowers: '舐めた花', jumps: 'ジャンプ', blocks: 'かじったブロック',
+      damage: '受けたダメージ', deaths: '死亡', bumps: '衝突', slime_hits: 'スライムを噛んだ'};
+    $('gstats').innerHTML = Object.entries(names).map(([k, l]) => `<span>${l}</span><b>${g[k] ?? 0}</b>`).join('');
+  }
+  drawBrain(s);
+  drawMap(s);
+}
+
+let tickMap = 0;
+async function loop() {
+  try {
+    const s = await (await fetch('/api/state')).json();
+    if (s.tick !== undefined) render(s);
+    if (++tickMap % 20 === 0 && minimapImg) loadMap();
+  } catch (e) { $('st-err').textContent = '接続が切れました'; }
+  setTimeout(loop, 100);
+}
+
+$('pause').onclick = () => post({type: 'pause', value: !paused});
+$('reset-brain').onclick = () => post({type: 'reset_brain'});
+$('reset-world').onclick = () => post({type: 'reset_world'});
+$('hunger-in').onchange = (e) => post({type: 'hunger', value: +e.target.value});
+loadBrain().then(loadMap).then(loop);
+</script>
+</body>
+</html>
