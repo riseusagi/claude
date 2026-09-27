@@ -91,6 +91,7 @@
   <h1>🪰 <span>FlyCraft</span> — ハエの脳がマインクラフトをプレイ</h1>
   <div class="chips">
     <span class="chip mode">モード <b id="st-backend">-</b></span>
+    <span class="chip">バージョン <b id="st-ver">-</b></span>
     <span class="chip">脳 <b id="st-brain">-</b></span>
     <span class="chip">脳の時間 <b id="st-t">0</b> s</span>
     <span class="chip">速度 <b id="st-rt">-</b> × 実時間</span>
@@ -330,6 +331,7 @@ function drawMap(s) {
 function render(s) {
   const MODES = {screen: '画面モード（キー・マウス）', 'bedrock-ws': 'WebSocket モード（/connect）', sim: '内蔵ワールド'};
   $('st-backend').textContent = MODES[s.backend] || s.backend || '-';
+  $('st-ver').textContent = s.version || '-';
   $('st-brain').textContent = layout ? layout.name : '-';
   $('st-t').textContent = (s.brain_t ?? 0).toFixed(1);
   $('st-rt').textContent = s.realtime ?? '-';

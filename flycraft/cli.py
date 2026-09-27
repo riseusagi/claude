@@ -349,7 +349,13 @@ def main(argv: Optional[list] = None) -> None:
         os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
         os.environ.setdefault("KMP_BLOCKTIME", "0")
     if args.cmd in ("sim", "bedrock", "screen"):
+        from .version import PKG_DIR, describe, is_installed_copy
+
         _log(BANNER)
+        _log(f"FlyCraft {describe()}  —  {PKG_DIR}")
+        if is_installed_copy():
+            _log("⚠ git のフォルダではなく、インストール時にコピーされたコードで動いています。"
+                 "git pull の変更を反映するには、リポジトリのフォルダで `py -m pip install -e .` を実行し直してください。")
     args.func(args)
 
 

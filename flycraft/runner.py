@@ -14,6 +14,14 @@ from .fly import OPTO_GROUPS, Fly
 from .interface import Action, Backend, Observation
 
 
+try:
+    from .version import describe as _describe
+
+    _VERSION = _describe()
+except Exception:  # pragma: no cover
+    _VERSION = "?"
+
+
 def _b64(a: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")
 
@@ -104,7 +112,8 @@ class Session:
 
     def _run(self) -> None:
         with self._lock:
-            self._snapshot = {"tick": 0, "backend": self.backend.name, "status": "ゲームへの接続を待っています…"}
+            self._snapshot = {"version": _VERSION, "tick": 0, "backend": self.backend.name,
+                              "status": "ゲームへの接続を待っています…"}
         try:
             self.obs = self.backend.reset()
         except Exception as e:  # pragma: no cover - 接続エラーなど
@@ -146,7 +155,7 @@ class Session:
     # ----------------------------------------------------------- telemetry
     def _publish(self) -> None:
         fly = self.fly
-        snap: Dict[str, Any] = {"tick": self.tick, "paused": self.paused, "loop_hz": round(self.loop_hz, 1),
+        snap: Dict[str, Any] = {"version": _VERSION, "tick": self.tick, "paused": self.paused, "loop_hz": round(self.loop_hz, 1),
                                 "backend": self.backend.name, "error": self.error, "status": ""}
         snap.update(fly.telemetry())
         obs = self.obs
@@ -173,8 +182,10 @@ class Session:
         snap["act_val"] = _b64(np.clip(act[top] * 60, 0, 255).astype(np.uint8))
         try:
             snap.update(self.backend.extra_telemetry())
-        except Exception:
-            pass
+        except Exception as e:  # 黙って捨てるとダッシュボードの項目が消えて原因が分からない
+            if not getattr(self, "_telemetry_err", False):
+                self._telemetry_err = True
+                self.log(f"[flycraft] ダッシュボード用の情報を取得できません: {type(e).__name__}: {e}")
         with self._lock:
             self._snapshot = snap
 
