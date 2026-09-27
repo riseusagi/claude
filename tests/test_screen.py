@@ -23,6 +23,7 @@ class SimScreen:
         self.keys = set()
         self.log = []
         self.cursor = False  # True = カーソル表示（メニュー中）
+        self.menu = False  # True = メニュー・チャット中（マウスで視点が回らない）
 
     # capture API
     def start(self):
@@ -53,6 +54,8 @@ class SimScreen:
 
     def move(self, dx, dy):
         self.log.append(("move", dx, dy))
+        if self.menu:
+            return
         p = self.world.player
         p.yaw = (p.yaw - dx * DPP) % 360
         p.pitch = float(np.clip(p.pitch - dy * DPP, -90, 90))
@@ -264,3 +267,36 @@ def test_default_turn_is_fast_enough():
         t += 0.05
     px = sum(e[1] for e in dev.log if e[0] == "move")
     assert px == 600
+
+
+def test_stops_when_mouse_does_not_turn_the_view():
+    """統合版のチャット等でカーソル判定が効かなくても、視点が回らなければ入力を止める。"""
+    fake = SimScreen(seed=2)
+    be = make_backend(fake, calibrate=False)  # カーソル判定は常に「隠れている」
+    be.reset()
+
+    def run(seconds, turn=0.0):
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            be.step(Action(forward=1.0, turn=turn), 0.05)
+
+    run(1.0)
+    assert "w" in fake.keys and be.view.ok
+    fake.menu = True  # チャットを開いた（旋回していなくても定期的な確認で気づく）
+    run(4.0)
+    assert not be.view.ok
+    assert "w" not in fake.keys
+    assert "視点" in be.status
+    fake.menu = False  # ゲームに戻った
+    run(3.0)
+    assert be.view.ok and "w" in fake.keys
+
+
+def test_view_check_passes_during_normal_turning():
+    fake = SimScreen(seed=3)
+    be = make_backend(fake, calibrate=False)
+    be.reset()
+    t0 = time.time()
+    while time.time() - t0 < 3.0:
+        be.step(Action(forward=0.5, turn=0.4), 0.05)
+        assert be.view.ok

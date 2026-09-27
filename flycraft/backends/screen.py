@@ -700,6 +700,97 @@ class BumpDetector:
         return self.touch
 
 
+class ViewCheck:
+    """マウスを動かしたら視点が回るか（= ゲーム画面か）を画像で確かめる。
+
+    統合版ではメニューやチャットでもカーソルの状態で判定できない場合があるため、
+    「送ったマウス移動に対して画面が回転したか」を直接見る。ハエがあまり旋回しないときは
+    数秒ごとに小さく（約 3°）左右に振って確かめる。回らなければ入力を止め、
+    回るようになったら再開する。
+    """
+
+    def __init__(self, probe_deg: float = 3.0, probe_every: float = 2.5, lag: float = 0.08) -> None:
+        self.probe_deg = probe_deg
+        self.probe_every = probe_every
+        self.lag = lag
+        self.total = 0.0  # 送った回転の累計 [度]（+ = 左）
+        self.hist = [(0.0, 0.0)]  # (時刻, 累計)
+        self.frames = []  # (時刻, 画面中央の灰色画像, 倍率)
+        self.ok = True
+        self.fails = 0
+        self.last_eval = 0.0
+        self.last_checked = time.time()
+        self.probe_back = None  # (戻す時刻, px)
+        self.observed = 0.0
+        self.expected = 0.0
+
+    def record_move(self, t: float, deg: float) -> None:
+        if deg:
+            self.total += deg
+            self.hist.append((t, self.total))
+            self.hist = self.hist[-400:]
+
+    def _turned_at(self, t: float) -> float:
+        v = self.hist[0][1]
+        for tt, tot in self.hist:
+            if tt <= t:
+                v = tot
+            else:
+                break
+        return v
+
+    def add_frame(self, t: float, frame: np.ndarray, focal: float) -> None:
+        if self.frames and self.frames[-1][0] == t:
+            return
+        g = _gray_small(frame, w=192)
+        h, w = g.shape
+        crop = g[int(h * 0.2):int(h * 0.8), int(w * 0.25):int(w * 0.75)]
+        self.frames.append((t, crop, frame.shape[1] / w / focal))
+        self.frames = [f for f in self.frames if f[0] > t - 1.5]
+        self._evaluate(t)
+
+    def _evaluate(self, t1: float) -> None:
+        if t1 - self.last_eval < 0.25 or len(self.frames) < 3:
+            return
+        f1 = self.frames[-1]
+        cands = [f for f in self.frames if 0.25 <= t1 - f[0] <= 0.7]
+        if not cands:
+            return
+        f0 = cands[-1]
+        exp = self._turned_at(t1 - self.lag) - self._turned_at(f0[0] - self.lag)
+        if not 2.5 <= abs(exp) <= 20.0:
+            return
+        self.last_eval = t1
+        dx, _, peak = phase_shift(f0[1], f1[1])
+        obs = math.degrees(math.atan(dx * f1[2]))  # 左を向くと画面は右へずれる（dx > 0）
+        self.observed, self.expected = obs, exp
+        self.last_checked = t1
+        if peak >= 0.05 and obs / exp > 0.3:
+            self.fails = 0
+            self.ok = True
+        else:
+            self.fails += 1
+            if self.fails >= 2:
+                self.ok = False
+
+    def probe(self, t: float, dev, deg_per_px: float) -> None:
+        """必要なら確認のために小さく振る（行って、少しあとで戻す）。"""
+        if self.probe_back is not None:
+            t_back, px = self.probe_back
+            if t >= t_back:
+                dev.move(-px, 0)
+                self.record_move(t, px * deg_per_px)
+                self.probe_back = None
+            return
+        wait = self.probe_every if self.ok else 1.0
+        if t - self.last_checked >= wait:
+            px = max(1, int(round(self.probe_deg / max(deg_per_px, 1e-4))))
+            dev.move(px, 0)  # 右へ
+            self.record_move(t, -px * deg_per_px)
+            self.probe_back = (t + 0.45, px)
+            self.last_checked = t
+
+
 # ================================================================ backend
 class ScreenBackend(Backend):
     name = "screen"
@@ -708,7 +799,7 @@ class ScreenBackend(Backend):
     def __init__(self, window: Optional[str] = "Minecraft", region: Optional[str] = None,
                  fov_v: float = 70.0, deg_per_px: Optional[float] = None, calibrate: bool = True,
                  pitch: Optional[float] = 8.0, cursor_check: bool = True, countdown: float = 3.0,
-                 policy: Optional[KeyPolicy] = None, capture=None, input_device=None,
+                 policy: Optional[KeyPolicy] = None, capture=None, input_device=None, check_view: bool = True,
                  log: Callable[[str], None] = print) -> None:
         self.cap = capture or ScreenCapture(window, region)
         self.dev = input_device or make_input()
@@ -717,10 +808,12 @@ class ScreenBackend(Backend):
         self.calibrate = calibrate and deg_per_px is None
         self.target_pitch = pitch
         self.cursor_check = cursor_check
+        self.check_view = check_view
         self.countdown = countdown
         self.log = log
         self.paused = False
         self.bump = BumpDetector()
+        self.view = ViewCheck()
         self.status = ""
         self.events = []
         self._t_last = time.perf_counter()
@@ -752,6 +845,8 @@ class ScreenBackend(Backend):
         hidden = self.cursor_hidden()
         if hidden is False:
             return False, "マウスカーソルが表示されています（メニュー・チャット中？ Esc でゲームに戻す）"
+        if not self.view.ok:
+            return False, "マウスで視点が回りません（メニュー・チャット・インベントリ中？ Esc でゲームに戻す）"
         return True, "操作中"
 
     # --------------------------------------------------------------- setup
@@ -888,6 +983,9 @@ class ScreenBackend(Backend):
         walking = self.ctl.keys["w"].down and self._walk_since is not None and t - self._walk_since > 0.3
         fov_h = math.degrees(2 * math.atan(math.tan(math.radians(self.fov_v) / 2) * frame.shape[1] / frame.shape[0]))
         touch = self.bump.update(frame, t, walking, dt, self.ctl.turned_deg, fov_h)
+        if self.check_view:
+            focal = (frame.shape[1] / 2) / math.tan(math.radians(fov_h) / 2)
+            self.view.add_frame(t, frame, focal)
         return Observation(frame=frame, fov_v=self.fov_v, touch_left=touch, touch_right=touch,
                            info={"状態": self.status, "キー": "".join(k.upper() for k, v in self.ctl.pressed().items() if v),
                                  "視差": round(self.bump.residual, 3)})
@@ -899,6 +997,10 @@ class ScreenBackend(Backend):
             self.paused = not self.paused
             self.log("⏸ 一時停止（F8）" if self.paused else "▶ 再開（F8）")
         active, why = self.game_active()
+        # メニュー等で視点が回らなくなっていないか確かめる（前面・一時停止でない・カーソル非表示のときだけ）
+        if active or (why.startswith("マウスで視点") and self.check_view):
+            self.view.probe(time.time(), self.dev, self.ctl.deg_per_px)
+            active, why = self.game_active()
         self.status = why
         if active != self._was_active:
             self._was_active = active
@@ -915,6 +1017,7 @@ class ScreenBackend(Backend):
             self.ctl.apply(action, mono, wall_dt)
         else:
             self.ctl.release_all(mono)
+        self.view.record_move(time.time(), self.ctl.turned_deg - before)
         if wall_dt > 0:
             inst = abs(self.ctl.turned_deg - before) / wall_dt
             k = min(1.0, wall_dt / 1.0)  # 約 1 秒の平均
@@ -936,7 +1039,9 @@ class ScreenBackend(Backend):
         return {"status": self.status, "events": list(self.events[-8:]),
                 "keys": self.ctl.pressed(), "deg_per_px": round(self.ctl.deg_per_px, 4),
                 "turn_deg_s": round(self.ctl.p.turn_deg_s), "turn_rate": round(self.turn_rate),
-                "mouse_px_s": round(self.px_rate)}
+                "mouse_px_s": round(self.px_rate),
+                "view_check": {"ok": self.view.ok, "expected": round(self.view.expected, 1),
+                               "observed": round(self.view.observed, 1)}}
 
     def _emergency_release(self) -> None:
         try:

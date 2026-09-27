@@ -76,6 +76,11 @@
   .kv { font-size: 12px; color: var(--muted); display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 8px; }
   .kv b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .err { color: var(--bad); font-size: 12px; }
+  .scr { display: none; }
+  body.screen .scr { display: revert; }
+  .turnbox { font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; gap: 6px; }
+  body.screen .turnbox { display: flex; }
+  .turnbox input { flex: 1; min-width: 80px; }
   .note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 </style>
 </head>
@@ -126,7 +131,11 @@
       <span>空腹度</span><b id="hunger">-</b>
       <span>体力</span><b id="health">-</b>
       <span>反射</span><b id="reflex">-</b>
+      <span class="scr">実際の旋回</span><b class="scr" id="turn-now">-</b>
+      <span class="scr">マウス移動</span><b class="scr" id="mouse-now">-</b>
+      <span class="scr">視点の確認</span><b class="scr" id="view-now">-</b>
     </div>
+    <label class="scr turnbox">旋回の速さ（最大）<input type="range" id="turn-in" min="60" max="1080" step="30"><b id="turn-val">-</b></label>
     <div class="note">反射 = 壁を押し続けたときの胸部神経節の反射（脳データ外の単純な規則）。作動中はキーが脳の指令と異なります。</div>
   </section>
 
@@ -149,8 +158,6 @@
     <div class="opto" id="opto"></div>
     <div class="ctrl">
       <label>空腹度 <input type="range" id="hunger-in" min="0" max="1" step="0.05"></label>
-      <label id="turn-box" style="display:none">旋回の速さ <input type="range" id="turn-in" min="60" max="1080" step="30">
-        <b id="turn-val">-</b></label>
       <button id="pause">⏸ 一時停止</button>
       <button id="reset-brain">脳をリセット</button>
       <button id="reset-world">世界をリセット</button>
@@ -364,9 +371,14 @@ function render(s) {
   fr.querySelector('.val').textContent = (m.feed_both || 0).toFixed(1);
   $('hunger').textContent = (s.hunger ?? 0).toFixed(2);
   if (s.turn_deg_s !== undefined) {
-    $('turn-box').style.display = '';
+    document.body.classList.add('screen');
     if (document.activeElement !== $('turn-in')) $('turn-in').value = s.turn_deg_s;
-    $('turn-val').textContent = `最大 ${s.turn_deg_s}°/秒（今 ${s.turn_rate ?? 0}°/秒・マウス ${s.mouse_px_s ?? 0} px/秒）`;
+    $('turn-val').textContent = `${s.turn_deg_s}°/秒`;
+    $('turn-now').textContent = `${s.turn_rate ?? 0}°/秒`;
+    $('mouse-now').textContent = `${s.mouse_px_s ?? 0} px/秒（1 px ≈ ${s.deg_per_px ?? '-'}°）`;
+    const v = s.view_check || {};
+    $('view-now').textContent = v.ok === false ? '⚠ 視点が回らない（メニュー中？）' : 'OK';
+    $('view-now').style.color = v.ok === false ? 'var(--accent)' : '';
   }
   const rf = s.reflex || {};
   $('reflex').textContent = !rf.enabled ? '無効' : (rf.active ? '⚠ 作動中（障害物回避）' : `待機（${rf.count ?? 0} 回作動）`);
