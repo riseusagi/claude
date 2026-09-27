@@ -43,7 +43,7 @@ SWEET_BELOW = ["honey_block"]
 BITTER_FEET = ["fire", "lava", "wither_rose", "sweet_berry_bush"]
 BITTER_BELOW = ["magma", "cactus"]
 WALK_SPEED = 4.3  # ブロック/秒
-TURN_SPEED = 180.0  # 度/秒
+TURN_SPEED = 360.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（既定）
 
 
 def _uuid() -> str:
@@ -289,8 +289,13 @@ class BedrockWSBackend(Backend):
         self._bite_cd = 0.0
         self._tick = 0
         self._t_last = time.perf_counter()
+        self._t_step = 0.0
         self._cmd_forward = 0.0
+        self._last_dyaw = 0.0
         self.paused_by_chat = False
+        self.turn_deg_s = TURN_SPEED
+        self.turn_rate = 0.0  # 実際に回している速さ [度/秒]
+        self.status = "接続待ち"
         self.control_hook: Optional[Callable[[Dict[str, Any]], None]] = None
         self.events: List[str] = []
 
@@ -315,7 +320,11 @@ class BedrockWSBackend(Backend):
             self.log(f"   …接続待ち（/connect localhost:{port}）")
         for ev in EVENTS:
             self.bridge.subscribe(ev)
-        self.bridge.command('tellraw @s {"rawtext":[{"text":"§e🪰 FlyCraft: ハエの脳が体を動かします。 !fly stop / !fly go"}]}')
+        # コマンドの実行結果（「テレポートしました」やエラー）がチャットに流れ続けないようにする
+        self.bridge.command("gamerule sendcommandfeedback false")
+        self.bridge.command('tellraw @s {"rawtext":[{"text":"§e🪰 FlyCraft: ハエの脳が体を動かします。 Esc でチャットを閉じてください。 !fly stop / !fly go"}]}')
+        self.log("   チャットは Esc で閉じてください（開いたままだと画面が見えず、ハエの目にもチャットが映ります）")
+        self.events.append("接続しました")
         r = self.bridge.run("querytarget @s")
         if r:
             q = parse_querytarget(r)
@@ -331,8 +340,16 @@ class BedrockWSBackend(Backend):
         if not self.bridge.connected.is_set():
             time.sleep(dt)
             return self._observe(dt)
+        now = time.perf_counter()
+        wall_dt = min(0.2, max(0.0, now - self._t_step)) if self._t_step else 0.05
+        self._t_step = now
         if not self.paused_by_chat:
-            self._act(action, dt)
+            self._act(action, wall_dt if wall_dt > 0 else dt)
+            self.status = "操作中"
+        else:
+            self.status = "チャットの !fly stop で停止中（!fly go で再開）"
+        if wall_dt > 0:
+            self.turn_rate += min(1.0, wall_dt) * (abs(self._last_dyaw) / wall_dt - self.turn_rate)
         self._query()
         # 実時間に合わせる
         now = time.perf_counter()
@@ -348,7 +365,9 @@ class BedrockWSBackend(Backend):
         if fwd < 0:
             fwd *= 0.5
         dist = WALK_SPEED * fwd * dt
-        dyaw = -TURN_SPEED * float(np.clip(action.turn, -1, 1)) * dt  # MC の yaw は右回りが正
+        dyaw = -self.turn_deg_s * float(np.clip(action.turn, -1, 1)) * dt  # MC の yaw は右回りが正
+        dyaw = float(np.clip(dyaw, -60.0, 60.0))
+        self._last_dyaw = dyaw
         self._cmd_forward = dist
         if abs(dist) > 1e-3 or abs(dyaw) > 0.05:
             b.command(f"execute as @s at @s rotated ~ 0 run tp @s ^ ^ ^{dist:.3f} ~{dyaw:.2f} {self.pitch:.1f} true")
@@ -506,8 +525,12 @@ class BedrockWSBackend(Backend):
         return Observation(frame=frame, fov_v=fov, sugar=self._sugar, bitter=self._bitter,
                            touch_left=self._touch, touch_right=self._touch, info=info)
 
+    def set_turn_speed(self, deg_s: float) -> None:
+        self.turn_deg_s = float(np.clip(deg_s, 30, 1440))
+
     def extra_telemetry(self) -> Dict[str, Any]:
-        return {"events": list(self.events[-8:])}
+        return {"events": list(self.events[-8:]), "status": self.status,
+                "turn_deg_s": round(self.turn_deg_s), "turn_rate": round(self.turn_rate)}
 
     def close(self) -> None:
         self.bridge.close()

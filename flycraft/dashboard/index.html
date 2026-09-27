@@ -76,10 +76,12 @@
   .kv { font-size: 12px; color: var(--muted); display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 8px; }
   .kv b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .err { color: var(--bad); font-size: 12px; }
-  .scr { display: none; }
-  body.screen .scr { display: revert; }
+  .scr, .mouse { display: none; }
+  body.turnable .scr, body.screen .mouse { display: revert; }
+  .mode { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 700; }
+  .mode b { color: #111; }
   .turnbox { font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; gap: 6px; }
-  body.screen .turnbox { display: flex; }
+  body.turnable .turnbox { display: flex; }
   .turnbox input { flex: 1; min-width: 80px; }
   .note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 </style>
@@ -88,7 +90,7 @@
 <header>
   <h1>🪰 <span>FlyCraft</span> — ハエの脳がマインクラフトをプレイ</h1>
   <div class="chips">
-    <span class="chip">接続 <b id="st-backend">-</b></span>
+    <span class="chip mode">モード <b id="st-backend">-</b></span>
     <span class="chip">脳 <b id="st-brain">-</b></span>
     <span class="chip">脳の時間 <b id="st-t">0</b> s</span>
     <span class="chip">速度 <b id="st-rt">-</b> × 実時間</span>
@@ -132,8 +134,8 @@
       <span>体力</span><b id="health">-</b>
       <span>反射</span><b id="reflex">-</b>
       <span class="scr">実際の旋回</span><b class="scr" id="turn-now">-</b>
-      <span class="scr">マウス移動</span><b class="scr" id="mouse-now">-</b>
-      <span class="scr">視点の確認</span><b class="scr" id="view-now">-</b>
+      <span class="mouse">マウス移動</span><b class="mouse" id="mouse-now">-</b>
+      <span class="mouse">視点の確認</span><b class="mouse" id="view-now">-</b>
     </div>
     <label class="scr turnbox">旋回の速さ（最大）<input type="range" id="turn-in" min="60" max="1080" step="30"><b id="turn-val">-</b></label>
     <div class="note">反射 = 壁を押し続けたときの胸部神経節の反射（脳データ外の単純な規則）。作動中はキーが脳の指令と異なります。</div>
@@ -326,7 +328,8 @@ function drawMap(s) {
 }
 
 function render(s) {
-  $('st-backend').textContent = s.backend || '-';
+  const MODES = {screen: '画面モード（キー・マウス）', 'bedrock-ws': 'WebSocket モード（/connect）', sim: '内蔵ワールド'};
+  $('st-backend').textContent = MODES[s.backend] || s.backend || '-';
   $('st-brain').textContent = layout ? layout.name : '-';
   $('st-t').textContent = (s.brain_t ?? 0).toFixed(1);
   $('st-rt').textContent = s.realtime ?? '-';
@@ -371,7 +374,8 @@ function render(s) {
   fr.querySelector('.val').textContent = (m.feed_both || 0).toFixed(1);
   $('hunger').textContent = (s.hunger ?? 0).toFixed(2);
   if (s.turn_deg_s !== undefined) {
-    document.body.classList.add('screen');
+    document.body.classList.add('turnable');
+    document.body.classList.toggle('screen', s.mouse_px_s !== undefined);
     if (document.activeElement !== $('turn-in')) $('turn-in').value = s.turn_deg_s;
     $('turn-val').textContent = `${s.turn_deg_s}°/秒`;
     $('turn-now').textContent = `${s.turn_rate ?? 0}°/秒`;

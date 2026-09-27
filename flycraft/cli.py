@@ -167,6 +167,7 @@ def cmd_bedrock(args) -> None:
     fly = make_fly(args, con, retino)
     backend = BedrockWSBackend(host=args.ws_host, port=args.ws_port, fov_v=args.fov,
                                screen_vision=args.screen_vision, window=args.window, log=_log)
+    backend.set_turn_speed(args.turn_speed)
     run_session(args, backend, fly)
 
 
@@ -316,6 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--screen-vision", action="store_true",
                    help="視覚を画面キャプチャから得る（同じ Windows PC で統合版を動かしている場合）")
     p.add_argument("--window", default="Minecraft", help="画面キャプチャするウィンドウ名")
+    p.add_argument("--turn-speed", type=float, default=360.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
     p.set_defaults(func=cmd_bedrock)
 
     p = sub.add_parser("probe", help="in silico 実験: ニューロン群を刺激して応答を見る")

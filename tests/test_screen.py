@@ -300,3 +300,17 @@ def test_view_check_passes_during_normal_turning():
     while time.time() - t0 < 3.0:
         be.step(Action(forward=0.5, turn=0.4), 0.05)
         assert be.view.ok
+
+
+def test_screen_turn_rate_matches_setting():
+    """脳の計算が速くて待ち時間が長くても、設定どおりの速さで回る（待ち時間を旋回量に含める）。"""
+    fake = SimScreen(seed=4)
+    be = make_backend(fake, calibrate=False, check_view=False)
+    be.reset()
+    be.set_turn_speed(360)
+    yaw0 = fake.world.player.yaw
+    t0 = time.time()
+    while time.time() - t0 < 1.0:
+        be.step(Action(turn=0.25), 0.05)
+    dyaw = ((fake.world.player.yaw - yaw0 + 180) % 360) - 180
+    assert 70 < dyaw < 110  # 0.25 × 360°/秒 × 1 秒 = 90°（+ = 左）

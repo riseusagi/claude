@@ -75,8 +75,8 @@ class Session:
                 self.paused = bool(msg.get("value", not self.paused))
             elif kind == "opto" and msg.get("group") in OPTO_GROUPS:
                 self.fly.opto[msg["group"]] = bool(msg.get("value"))
-            elif kind == "turn_speed" and hasattr(self.backend, "ctl"):
-                self.backend.ctl.p.turn_deg_s = float(np.clip(msg.get("value", 360), 30, 1440))
+            elif kind == "turn_speed" and hasattr(self.backend, "set_turn_speed"):
+                self.backend.set_turn_speed(float(msg.get("value", 360)))
             elif kind == "hunger":
                 self.fly.hunger = float(np.clip(msg.get("value", 0.5), 0, 1))
             elif kind == "reset_brain":

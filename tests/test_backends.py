@@ -1,6 +1,7 @@
 import json
 import socket
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def test_bedrock_backend_with_mock_client():
         p = mock.world.player
         x0, z0, yaw0 = p.x, p.z, p.yaw
         for i in range(30):
-            o = be.step(Action(forward=1.0, turn=0.4), 0.05)
+            o = be.step(Action(forward=1.0, turn=0.15), 0.05)
         assert np.hypot(p.x - x0, p.z - z0) > 0.5 or be._touch > 0
         dyaw = ((p.yaw - yaw0 + 180) % 360) - 180
         assert dyaw > 0  # + = 左回り
@@ -96,3 +97,29 @@ def test_cli_probe_with_toy(capsys):
     main(["probe", "sugar", "--toy", "--ms", "300", "--seed", "0"])
     out = capsys.readouterr().out
     assert "feed_both" in out and "発火したニューロン" in out
+
+
+def test_bedrock_turn_speed_and_telemetry():
+    pytest.importorskip("websockets")
+    from mock_bedrock import MockBedrock
+
+    port = free_port()
+    be = BedrockWSBackend(host="127.0.0.1", port=port, wait_timeout=15, log=lambda *_: None)
+    mock = MockBedrock(port).start()
+    try:
+        be.reset()
+        assert "gamerule sendcommandfeedback false" in mock.commands
+        be.set_turn_speed(360)
+        p = mock.world.player
+        yaw0 = p.yaw
+        t0 = time.time()
+        while time.time() - t0 < 1.0:
+            be.step(Action(turn=0.25), 0.05)
+        time.sleep(0.2)
+        dyaw = ((p.yaw - yaw0 + 180) % 360) - 180
+        assert 65 < dyaw < 115  # 0.25 × 360°/秒 × 1 秒 = 90°（+ = 左）
+        ex = be.extra_telemetry()
+        assert ex["turn_deg_s"] == 360 and ex["turn_rate"] > 50 and ex["status"] == "操作中"
+    finally:
+        mock.stop()
+        be.close()

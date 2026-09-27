@@ -817,6 +817,7 @@ class ScreenBackend(Backend):
         self.status = ""
         self.events = []
         self._t_last = time.perf_counter()
+        self._t_step = 0.0
         self._walk_since = None
         self._was_active = None
         self.turn_rate = 0.0  # 実際に回している速さ [度/秒]
@@ -992,7 +993,9 @@ class ScreenBackend(Backend):
 
     def step(self, action: Action, dt: float) -> Observation:
         now = time.perf_counter()
-        wall_dt = min(0.2, max(0.0, now - self._t_last))
+        # 前回の操作から今回までの実時間（待ち時間も含める。以前は待ち時間を除いてしまい旋回が遅かった）
+        wall_dt = min(0.2, max(0.0, now - self._t_step)) if self._t_step else 0.05
+        self._t_step = now
         if self.dev.hotkey_pressed(self.VK_F8):
             self.paused = not self.paused
             self.log("⏸ 一時停止（F8）" if self.paused else "▶ 再開（F8）")
@@ -1034,6 +1037,9 @@ class ScreenBackend(Backend):
             time.sleep(wait)
         self._t_last = time.perf_counter()
         return self._observe(dt)
+
+    def set_turn_speed(self, deg_s: float) -> None:
+        self.ctl.p.turn_deg_s = float(np.clip(deg_s, 30, 1440))
 
     def extra_telemetry(self):
         return {"status": self.status, "events": list(self.events[-8:]),
