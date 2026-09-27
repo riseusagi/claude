@@ -1,9 +1,8 @@
-"""画面キャプチャ + 仮想キーボード/マウスで Minecraft 統合版を操作する（方法 B）。
+"""画面キャプチャ + 仮想キーボード/マウスで Minecraft 統合版を操作する（Windows 専用）。
 
 * 視覚: Minecraft のウィンドウを別スレッドでキャプチャし続け、最新の画像を使う。
-  Windows は GDI の StretchBlt（HALFTONE = 面積平均の縮小）で小さく取り込むので軽い。
-  それ以外は mss（pip install mss）。
-* 操作: Windows は SendInput（スキャンコード + 相対マウス移動）。それ以外は pynput。
+  GDI の StretchBlt（HALFTONE = 面積平均の縮小）で小さく取り込むので軽い。
+* 操作: SendInput（スキャンコード + 相対マウス移動）。追加のライブラリは不要（ctypes のみ）。
 * 安全装置（入力を送るのは次をすべて満たすときだけ）:
   - Minecraft のウィンドウが最前面
   - マウスカーソルが隠れている（= ゲームがマウスを掴んでいる。ポーズ・インベントリ・チャット中は
@@ -38,7 +37,6 @@ import numpy as np
 from ..interface import Action, Backend, Observation
 
 IS_WIN = sys.platform == "win32"
-IS_X11 = sys.platform.startswith("linux") and bool(os.environ.get("DISPLAY"))
 
 Rect = Tuple[int, int, int, int]
 
@@ -67,6 +65,7 @@ def _win_prototypes() -> None:
     u.ClientToScreen.argtypes = (W.HWND, ctypes.POINTER(W.POINT))
     u.GetDC.argtypes, u.GetDC.restype = (W.HWND,), W.HDC
     u.ReleaseDC.argtypes = (W.HWND, W.HDC)
+    k.GetConsoleWindow.restype = W.HWND
     k.OpenProcess.argtypes, k.OpenProcess.restype = (W.DWORD, W.BOOL, W.DWORD), W.HANDLE
     k.CloseHandle.argtypes = (W.HANDLE,)
     k.QueryFullProcessImageNameW.argtypes = (W.HANDLE, W.DWORD, W.LPWSTR, ctypes.POINTER(W.DWORD))
@@ -116,8 +115,8 @@ def _win_process_name(hwnd) -> str:
 
 
 BROWSERS = ("chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "explorer.exe",
-            "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "python.exe", "pythonw.exe",
-            "code.exe", "discord.exe")
+            "windowsterminal.exe", "cmd.exe", "conhost.exe", "powershell.exe", "pwsh.exe", "code.exe",
+            "discord.exe")
 
 
 def window_score(title: str, proc: str, want: str) -> int:
@@ -144,8 +143,11 @@ def find_window(title_part: str):
     user32 = ctypes.windll.user32
     found = []
     proc_t = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    own_console = ctypes.windll.kernel32.GetConsoleWindow()
 
     def cb(hwnd, _):
+        if hwnd == own_console:
+            return True
         if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
             n = user32.GetWindowTextLengthW(hwnd)
             if n:
@@ -258,44 +260,7 @@ class _GdiGrabber:
         self._size = None
 
 
-# ===================================================================== X11
-class _X11Probe:
-    """X11 でカーソルが隠れているか（XFixes）を調べる。python-xlib が無ければ無効。"""
-
-    def __init__(self) -> None:
-        self.ok = False
-        try:
-            from Xlib import display
-
-            self.d = display.Display()
-            self.d.xfixes_query_version()
-            self.root = self.d.screen().root
-            self.ok = True
-        except Exception:
-            self.ok = False
-
-    def cursor_hidden(self) -> Optional[bool]:
-        if not self.ok:
-            return None
-        try:
-            img = self.d.xfixes_get_cursor_image(self.root)
-            return max(((p >> 24) & 255 for p in img.cursor_image), default=0) == 0
-        except Exception:
-            return None
-
-
 # ================================================================= capture
-def area_downsample(img: np.ndarray, out_w: int) -> np.ndarray:
-    """整数倍の面積平均で縮小（間引きによるちらつき＝偽の動きを避ける）。"""
-    h, w = img.shape[:2]
-    k = max(1, w // out_w)
-    if k == 1:
-        return img
-    h2, w2 = (h // k) * k, (w // k) * k
-    x = img[:h2, :w2].reshape(h2 // k, k, w2 // k, k, img.shape[2]).mean(axis=(1, 3))
-    return x.astype(np.uint8)
-
-
 class ScreenCapture:
     """Minecraft のウィンドウ（または指定範囲）を別スレッドで取り込み続ける。"""
 
@@ -315,12 +280,9 @@ class ScreenCapture:
         self._thread: Optional[threading.Thread] = None
         self._stop = False
         self.error: Optional[str] = None
-        self.method = "gdi" if IS_WIN else "mss"
+        self.method = "gdi"
         if not IS_WIN:
-            import importlib.util
-
-            if importlib.util.find_spec("mss") is None:  # pragma: no cover - 環境依存
-                raise RuntimeError("画面キャプチャには mss が必要です: pip install mss")
+            raise RuntimeError("画面モードは Windows 専用です")
 
     # ---------------------------------------------------------- location
     def locate(self) -> Rect:
@@ -330,7 +292,7 @@ class ScreenCapture:
         if self._rect is not None and now - self._rect_t < 1.0:
             return self._rect
         rect = None
-        if self.window and IS_WIN:
+        if self.window:
             if not self.hwnd or not ctypes.windll.user32.IsWindow(self.hwnd):
                 self.hwnd = find_window(self.window)
             rect = client_rect(self.hwnd) if self.hwnd else None
@@ -342,29 +304,21 @@ class ScreenCapture:
         return rect
 
     def _monitor(self) -> Rect:
-        if IS_WIN:
-            u = ctypes.windll.user32
-            return 0, 0, u.GetSystemMetrics(0), u.GetSystemMetrics(1)
-        with _mss() as s:
-            m = s.monitors[1]
-            return m["left"], m["top"], m["width"], m["height"]
+        u = ctypes.windll.user32
+        return 0, 0, u.GetSystemMetrics(0), u.GetSystemMetrics(1)
 
     # ----------------------------------------------------------- grabbing
     def _grab_once(self, grabber) -> np.ndarray:
         x, y, w, h = self.locate()
         ow = min(self.out_width, w)
         oh = max(1, int(round(h * ow / w)))
-        if IS_WIN:
-            return grabber.grab((x, y, w, h), ow, oh)
-        shot = grabber.grab({"left": x, "top": y, "width": w, "height": h})
-        img = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)[:, :, 2::-1]
-        return np.ascontiguousarray(area_downsample(img, ow))
+        return grabber.grab((x, y, w, h), ow, oh)
 
     def grab(self) -> np.ndarray:
         """同期的に 1 枚取り込む（スレッド未使用時・較正用）。"""
         if self._thread is not None:
             return self.wait_frame(after=time.time())
-        g = _GdiGrabber() if IS_WIN else _mss()
+        g = _GdiGrabber()
         try:
             return self._grab_once(g)
         finally:
@@ -376,7 +330,7 @@ class ScreenCapture:
             self._thread.start()
 
     def _loop(self) -> None:
-        g = _GdiGrabber() if IS_WIN else _mss()
+        g = _GdiGrabber()
         period = 1.0 / self.fps
         try:
             while not self._stop:
@@ -421,19 +375,11 @@ class ScreenCapture:
 
     # -------------------------------------------------------------- state
     def foreground(self) -> bool:
-        if IS_WIN:
-            if self.hwnd:
-                return win_is_foreground(self.hwnd)
-            # ウィンドウが見つからないのに入力すると、ターミナルやブラウザにキーを送ってしまう。
-            # 範囲を明示指定したときだけ（カーソル判定を頼りに）許可する。
-            return self.region is not None
-        return True
-
-
-def _mss():
-    import mss
-
-    return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+        if self.hwnd:
+            return win_is_foreground(self.hwnd)
+        # ウィンドウが見つからないのに入力すると、ターミナルやブラウザにキーを送ってしまう。
+        # 範囲を明示指定したときだけ（カーソル判定を頼りに）許可する。
+        return self.region is not None
 
 
 # =================================================================== input
@@ -511,43 +457,6 @@ class _WinInput:
         return now and not was
 
 
-class _PynputInput:  # pragma: no cover - 環境依存
-    def __init__(self) -> None:
-        from pynput import keyboard, mouse
-
-        self.kb = keyboard.Controller()
-        self.ms = mouse.Controller()
-        self.K = {"w": "w", "a": "a", "s": "s", "d": "d", "space": keyboard.Key.space,
-                  "shift": keyboard.Key.shift}
-        self.Button = mouse.Button
-        self._hot = set()
-        try:
-            def on_press(k):
-                if k == keyboard.Key.f8:
-                    self._hot.add(0x77)
-
-            self._listener = keyboard.Listener(on_press=on_press)
-            self._listener.daemon = True
-            self._listener.start()
-        except Exception:
-            self._listener = None
-
-    def key(self, name, down):
-        (self.kb.press if down else self.kb.release)(self.K[name])
-
-    def move(self, dx, dy):
-        self.ms.move(int(dx), int(dy))
-
-    def button(self, down):
-        (self.ms.press if down else self.ms.release)(self.Button.left)
-
-    def hotkey_pressed(self, vk):
-        if vk in self._hot:
-            self._hot.discard(vk)
-            return True
-        return False
-
-
 class _NullInput:
     """テスト用: 入力を送らず記録するだけ。"""
 
@@ -568,12 +477,9 @@ class _NullInput:
 
 
 def make_input():
-    if IS_WIN:
-        return _WinInput()
-    try:
-        return _PynputInput()
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError("キー入力の送信には Windows か pynput が必要です: pip install pynput") from e
+    if not IS_WIN:
+        raise RuntimeError("画面モードは Windows 専用です")
+    return _WinInput()
 
 
 # ============================================================== controller
@@ -805,7 +711,6 @@ class ScreenBackend(Backend):
         self.log = log
         self.paused = False
         self.bump = BumpDetector()
-        self.x11 = _X11Probe() if (IS_X11 and cursor_check) else None
         self.status = ""
         self.events = []
         self._t_last = time.perf_counter()
@@ -823,15 +728,13 @@ class ScreenBackend(Backend):
             return True
         if IS_WIN:
             return win_cursor_hidden()
-        if self.x11 is not None:
-            return self.x11.cursor_hidden()
-        return None  # 判定できない OS
+        return None
 
     def game_active(self) -> Tuple[bool, str]:
         if self.paused:
             return False, "F8 で一時停止中"
         if not self.cap.foreground():
-            if IS_WIN and not self.cap.hwnd and not self.cap.region:
+            if not self.cap.hwnd and not self.cap.region:
                 return False, "Minecraft のウィンドウが見つかりません（起動しているか、--window を確認）"
             return False, "Minecraft が最前面ではありません（クリックして前面に）"
         hidden = self.cursor_hidden()
@@ -846,12 +749,10 @@ class ScreenBackend(Backend):
         x, y, w, h = self.cap.locate()
         how = "ウィンドウ" if self.cap.hwnd else ("指定範囲" if self.cap.region else "画面全体")
         self.log(f"🎮 キャプチャ: {how} x={x} y={y} {w}×{h} → {frame.shape[1]}×{frame.shape[0]}（{self.cap.method}）")
-        if IS_WIN and not self.cap.hwnd and not self.cap.region:
+        if not self.cap.hwnd and not self.cap.region:
             self.log("   ⚠ Minecraft のウィンドウが見つかりません。起動しているか、--window でタイトルを指定してください")
         self.log("   ・Minecraft を最前面にしてゲーム画面（メニューが閉じた状態）にすると操作が始まります")
         self.log("   ・F8 で一時停止/再開、ターミナルで Ctrl+C で終了")
-        if self.cursor_check and IS_WIN is False and self.cursor_hidden() is None:
-            self.log("   ⚠ この環境ではメニュー表示中かどうかを判定できません（python-xlib を入れると判定できます）")
         for k in range(int(self.countdown), 0, -1):
             self.log(f"   {k}…")
             time.sleep(1.0)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flycraft"
 version = "0.1.0"
-description = "ハエ（キイロショウジョウバエ）の全脳コネクトームにマインクラフト統合版をプレイさせる"
+description = "ハエ（キイロショウジョウバエ）の全脳コネクトームにマインクラフト統合版（Windows）をプレイさせる"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -18,9 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["numba>=0.57"]
-screen = ["mss>=9", "pynput>=1.7; sys_platform != 'win32'"]
-all = ["numba>=0.57", "mss>=9", "pynput>=1.7; sys_platform != 'win32'"]
-dev = ["pytest>=7"]
+all = ["numba>=0.57"]
+dev = ["pytest>=7", "pygame>=2"]
 
 [project.scripts]
 flycraft = "flycraft.cli:main"

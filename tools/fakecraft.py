@@ -2,7 +2,7 @@
 操作系を真似たゲームウィンドウ。
 
 FlyCraft の `screen` モードは本物のゲームと同じように、このウィンドウを画面キャプチャし、
-仮想キーボード・マウス（X11 では XTest）で操作する。統合版の次の癖を再現して、
+仮想キーボード・マウス（SendInput）で操作する。統合版の次の癖を再現して、
 ハエの操作が意図しない動作を起こさないかを記録する:
 
 * W を素早く 2 回押す → ダッシュ（sprint）
@@ -11,10 +11,12 @@ FlyCraft の `screen` モードは本物のゲームと同じように、この�
 * 視点の揺れ（View Bobbing）、手の表示、HUD（照準・ホットバー・体力）
 * 自動ジャンプ、左クリック長押しで採掘
 
-使い方（Linux・仮想ディスプレイ上）:
-    Xvfb :99 -screen 0 854x480x24 &
-    DISPLAY=:99 python tools/fakecraft.py --log play.json &
-    DISPLAY=:99 python -m flycraft screen --region 0,0,854,480
+使い方（Windows、ターミナルを 2 つ）:
+    python tools/fakecraft.py --log play.json --pause-every 30
+    python -m flycraft screen
+FakeCraft のウィンドウ名は「Minecraft」なので、そのまま画面モードの対象になる
+（本物の Minecraft は閉じておく）。終了後の play.json に、ダッシュ・飛行の誤発動や
+ポーズ中の誤クリック、詰まっていた秒数などが記録される。
 """
 
 from __future__ import annotations

@@ -156,6 +156,10 @@ def cmd_sim(args) -> None:
 def cmd_bedrock(args) -> None:
     from .backends.bedrock_ws import BedrockWSBackend
 
+    if args.screen_vision and sys.platform != "win32":
+        _log("--screen-vision は Windows 専用です。")
+        sys.exit(1)
+
     con, retino = load_brain(args)
     fly = make_fly(args, con, retino)
     backend = BedrockWSBackend(host=args.ws_host, port=args.ws_port, fov_v=args.fov,
@@ -164,6 +168,10 @@ def cmd_bedrock(args) -> None:
 
 
 def cmd_screen(args) -> None:
+    if sys.platform != "win32":
+        _log("画面モードは Windows 専用です（Windows 版の Minecraft 統合版を操作します）。")
+        _log("Minecraft 無しで試すには `python -m flycraft sim` を使ってください。")
+        sys.exit(1)
     from .backends.screen import ScreenBackend
 
     con, retino = load_brain(args)
@@ -173,6 +181,8 @@ def cmd_screen(args) -> None:
                             pitch=None if args.pitch < 0 else args.pitch,
                             cursor_check=not args.no_cursor_check, log=_log)
     backend.ctl.p.turn_deg_s = args.turn_speed
+    # 画面からは味（花の蜜など）が分からず満腹になれないので、空腹度は初期値のまま固定する
+    fly.cfg.hunger_rate = 0.0
     run_session(args, backend, fly)
 
 
@@ -240,7 +250,7 @@ def cmd_bench(args) -> None:
 def _common(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("脳")
     g.add_argument("--toy", action="store_true", help="FlyWire の代わりにトイ・コネクトーム（人工回路）を使う")
-    g.add_argument("--data-dir", help="データの置き場所（既定: ~/.cache/flycraft、環境変数 FLYCRAFT_DATA）")
+    g.add_argument("--data-dir", help="データの置き場所（既定: %%LOCALAPPDATA%%\\flycraft、環境変数 FLYCRAFT_DATA）")
     g.add_argument("--engine", default="auto", choices=["auto", "numba", "numba-lazy", "numpy"])
     g.add_argument("--threads", type=int, help="numba のスレッド数")
     g.add_argument("--dt", type=float, default=None,
@@ -274,6 +284,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_download)
 
+    p = sub.add_parser("screen", help="【メイン】統合版の画面を見て、キーボード・マウスで操作する（Windows 専用）")
+    _common(p)
+    _run_opts(p)
+    p.add_argument("--window", default="Minecraft", help="対象ウィンドウ名（部分一致）")
+    p.add_argument("--region", help="キャプチャ範囲 x,y,w,h（ウィンドウが見つからない場合）")
+    p.add_argument("--turn-speed", type=float, default=150.0, help="旋回指令 1.0 のときの回転速度 [度/秒]")
+    p.add_argument("--deg-per-px", type=float, help="マウス 1 px あたりの回転角 [度]（指定すると自動較正しない）")
+    p.add_argument("--no-calibrate", action="store_true", help="起動時のマウス較正をしない")
+    p.add_argument("--pitch", type=float, default=8.0, help="較正後に視線を水平から何度下げるか（負の値でそのまま）")
+    p.add_argument("--no-cursor-check", action="store_true",
+                   help="カーソル表示中（メニュー画面）でも入力する。判定がうまくいかないときだけ使う")
+    p.set_defaults(func=cmd_screen)
+
     p = sub.add_parser("sim", help="内蔵のボクセルワールドで遊ばせる（Minecraft 不要）")
     _common(p)
     _run_opts(p)
@@ -288,22 +311,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ws-host", default="0.0.0.0")
     p.add_argument("--ws-port", type=int, default=19131)
     p.add_argument("--screen-vision", action="store_true",
-                   help="視覚を画面キャプチャから得る（同じ PC で統合版を動かしている場合）")
+                   help="視覚を画面キャプチャから得る（同じ Windows PC で統合版を動かしている場合）")
     p.add_argument("--window", default="Minecraft", help="画面キャプチャするウィンドウ名")
     p.set_defaults(func=cmd_bedrock)
-
-    p = sub.add_parser("screen", help="画面を見てキーボード・マウスで操作する（Windows 推奨）")
-    _common(p)
-    _run_opts(p)
-    p.add_argument("--window", default="Minecraft", help="対象ウィンドウ名（部分一致）")
-    p.add_argument("--region", help="キャプチャ範囲 x,y,w,h（ウィンドウが見つからない場合）")
-    p.add_argument("--turn-speed", type=float, default=150.0, help="旋回指令 1.0 のときの回転速度 [度/秒]")
-    p.add_argument("--deg-per-px", type=float, help="マウス 1 px あたりの回転角 [度]（指定すると自動較正しない）")
-    p.add_argument("--no-calibrate", action="store_true", help="起動時のマウス較正をしない")
-    p.add_argument("--pitch", type=float, default=8.0, help="較正後に視線を水平から何度下げるか（負の値でそのまま）")
-    p.add_argument("--no-cursor-check", action="store_true",
-                   help="カーソル表示中（メニュー画面）でも入力する。判定がうまくいかないときだけ使う")
-    p.set_defaults(func=cmd_screen)
 
     p = sub.add_parser("probe", help="in silico 実験: ニューロン群を刺激して応答を見る")
     _common(p)
