@@ -293,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     _run_opts(p)
     p.add_argument("--window", default="Minecraft", help="対象ウィンドウ名（部分一致）")
     p.add_argument("--region", help="キャプチャ範囲 x,y,w,h（ウィンドウが見つからない場合）")
-    p.add_argument("--turn-speed", type=float, default=360.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
+    p.add_argument("--turn-speed", type=float, default=180.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
     p.add_argument("--deg-per-px", type=float, help="マウス 1 px あたりの回転角 [度]（指定すると自動較正しない）")
     p.add_argument("--no-calibrate", action="store_true", help="起動時のマウス較正をしない")
     p.add_argument("--pitch", type=float, default=8.0, help="較正後に視線を水平から何度下げるか（負の値でそのまま）")
@@ -317,7 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--screen-vision", action="store_true",
                    help="視覚を画面キャプチャから得る（同じ Windows PC で統合版を動かしている場合）")
     p.add_argument("--window", default="Minecraft", help="画面キャプチャするウィンドウ名")
-    p.add_argument("--turn-speed", type=float, default=360.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
+    p.add_argument("--turn-speed", type=float, default=180.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
     p.set_defaults(func=cmd_bedrock)
 
     p = sub.add_parser("probe", help="in silico 実験: ニューロン群を刺激して応答を見る")

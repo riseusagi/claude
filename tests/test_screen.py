@@ -258,7 +258,7 @@ def test_calibration_handles_low_and_high_mouse_sensitivity(monkeypatch):
 
 
 def test_default_turn_is_fast_enough():
-    """旋回指令 0.25（脳でよく出る大きさ）で 90°/秒、1 px = 0.15° なら 1 秒で 600 px 動かす。"""
+    """旋回指令 0.25（脳でよく出る大きさ）で 45°/秒、1 px = 0.15° なら 1 秒で 300 px 動かす。"""
     dev = _NullInput()
     c = Controller(dev, KeyPolicy(), deg_per_px=0.15)
     t = 0.0
@@ -266,7 +266,7 @@ def test_default_turn_is_fast_enough():
         c.apply(Action(turn=-0.25), t, 0.05)
         t += 0.05
     px = sum(e[1] for e in dev.log if e[0] == "move")
-    assert px == 600
+    assert px == 300
 
 
 def test_stops_when_mouse_does_not_turn_the_view():

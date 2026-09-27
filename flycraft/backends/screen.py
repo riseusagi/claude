@@ -500,7 +500,7 @@ class KeyPolicy:
     jump_hold: float = 0.12  # Space を押している時間 [s]
     jump_cooldown: float = 0.6  # ジャンプの間隔（2 度押しで飛行モードにならないように）[s]
     attack_release: float = 0.3  # 噛む指令が消えてから左クリックを離すまで [s]
-    turn_deg_s: float = 360.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（ハエの急旋回は 500°/秒を超える）
+    turn_deg_s: float = 180.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（見やすさ重視。120〜240 が目安）
     max_turn_step: float = 60.0  # 1 回で回す角度の上限 [度]
 
 
