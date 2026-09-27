@@ -533,7 +533,7 @@ class SimWorld(Backend):
             if onground and s.timer <= 0:
                 dxp, dzp = p.x - s.x, p.z - s.z
                 dist = math.hypot(dxp, dzp)
-                if dist < 12 and self.rng.random() < 0.6:  # プレイヤーに向かって跳ねる
+                if dist < 12 and self.rng.random() < 0.35:  # ときどきプレイヤーに向かって跳ねる
                     ang = math.atan2(dxp, dzp) + self.rng.normal(0, 0.3)
                 else:
                     ang = self.rng.uniform(0, 2 * math.pi)
@@ -559,7 +559,7 @@ class SimWorld(Backend):
             if s.y < -5:
                 continue
             if math.hypot(p.x - s.x, p.z - s.z) < 0.7 and abs((p.y + 0.9) - (s.y + s.size / 2)) < 1.2 \
-                    and self.rng.random() < dt * 1.5:
+                    and self.rng.random() < dt * 0.8:
                 self._damage(1.0, "スライム")
                 self._touch = [1.0, 1.0]
             alive.append(s)

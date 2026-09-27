@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import shutil
 import sys
@@ -84,25 +85,58 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _fetch(url: str, dest: Path, log=print) -> None:
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": "flycraft"})
-    with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
+def _fetch_once(url: str, part: Path, log=print) -> bool:
+    """1 回分の取得。途中まであれば Range で続きから。完了したら True。"""
+    have = part.stat().st_size if part.exists() else 0
+    headers = {"User-Agent": "flycraft"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        if have and r.status != 206:  # 続きからに対応していない → 最初から
+            have = 0
+        length = int(r.headers.get("Content-Length") or 0)
+        total = have + length if length else 0
+        done = have
         last = -1
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            done += len(chunk)
-            if total:
-                pct = int(done * 100 / total)
-                if pct // 10 != last // 10:
-                    log(f"    {dest.name}: {pct}% ({done / 1e6:.0f}/{total / 1e6:.0f} MB)")
-                    last = pct
-    shutil.move(str(tmp), str(dest))
+        with open(part, "ab" if have else "wb") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    pct = int(done * 100 / total)
+                    if pct // 10 != last // 10:
+                        log(f"    {part.name[:-5]}: {pct}% ({done / 1e6:.0f}/{total / 1e6:.0f} MB)")
+                        last = pct
+    return not total or done == total
+
+
+def _fetch(url: str, dest: Path, log=print, attempts: int = 5) -> None:
+    part = dest.with_suffix(dest.suffix + ".part")
+    for k in range(attempts):
+        try:
+            if _fetch_once(url, part, log=log):
+                shutil.move(str(part), str(dest))
+                return
+            log("    …通信が途中で切れました。続きから再開します")
+        except (OSError, http.client.HTTPException) as e:
+            log(f"    …取得に失敗しました（{e}）。再試行します")
+    raise IOError(f"{url} を取得できませんでした（{attempts} 回失敗）")
+
+
+def _is_complete(dest: Path, src: "Source") -> bool:
+    marker = dest.with_suffix(dest.suffix + ".ok")
+    if not dest.exists():
+        return False
+    if marker.exists():
+        return True
+    if _sha256(dest) == src.sha256:
+        marker.touch()
+        return True
+    return False
 
 
 def download(data_dir: Optional[Path] = None, force: bool = False, log=print) -> Path:
@@ -112,18 +146,25 @@ def download(data_dir: Optional[Path] = None, force: bool = False, log=print) ->
     raw.mkdir(parents=True, exist_ok=True)
     for src in SOURCES:
         dest = raw / src.filename
-        if dest.exists() and not force:
+        marker = dest.with_suffix(dest.suffix + ".ok")
+        if not force and _is_complete(dest, src):
             log(f"  ✓ {src.filename}（取得済み）")
             continue
         log(f"  ↓ {src.filename} ({src.size_hint}) を取得中…")
         _fetch(src.url, dest, log=log)
-        digest = _sha256(dest)
-        if digest != src.sha256:
+        if _sha256(dest) != src.sha256:
             log(f"  ! {src.filename} のハッシュが開発時点と異なります（上流が更新された可能性）。続行します。")
+        marker.touch()
     cache = data_dir / CACHE_NAME
     if force or not cache.exists():
         log("  ⚙ 結合行列を変換中（初回のみ・数十秒）…")
-        con = build_from_raw(raw)
+        try:
+            con = build_from_raw(raw)
+        except Exception as e:
+            raise RuntimeError(
+                f"データの変換に失敗しました（{e}）。ファイルが壊れている可能性があります。"
+                "`python -m flycraft download --force` で取り直してください。"
+            ) from e
         con.save(cache)
         log(f"  ✓ {cache} を作成: {con.n:,} ニューロン, {con.n_connections:,} 結合, {con.n_synapses:,} シナプス")
     return cache

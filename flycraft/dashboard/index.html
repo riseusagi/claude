@@ -34,7 +34,7 @@
   .card h2 small { font-weight: 400; }
   .c-game { grid-column: span 5; } .c-eye { grid-column: span 4; } .c-act { grid-column: span 3; }
   .c-brain { grid-column: span 8; } .c-senses { grid-column: span 4; }
-  .c-opto { grid-column: span 5; } .c-map { grid-column: span 4; } .c-events { grid-column: span 3; }
+  .c-opto { grid-column: span 5; } .c-map { grid-column: span 3; } .c-events { grid-column: span 4; }
   @media (max-width: 1100px) {
     .c-game, .c-eye, .c-act, .c-brain, .c-senses, .c-opto, .c-map, .c-events { grid-column: span 12; }
   }
@@ -123,7 +123,9 @@
     <div class="kv">
       <span>空腹度</span><b id="hunger">-</b>
       <span>体力</span><b id="health">-</b>
+      <span>反射</span><b id="reflex">-</b>
     </div>
+    <div class="note">反射 = 壁を押し続けたときの胸部神経節の反射（脳データ外の単純な規則）。作動中はキーが脳の指令と異なります。</div>
   </section>
 
   <section class="card c-brain">
@@ -153,13 +155,13 @@
 
   <section class="card c-map">
     <h2>世界マップ <small id="map-info"></small></h2>
-    <canvas id="map" width="288" height="288" style="max-width:320px;margin:auto"></canvas>
-    <div class="kv" id="gstats"></div>
+    <canvas id="map" width="288" height="288" style="max-width:300px;margin:auto"></canvas>
   </section>
 
   <section class="card c-events">
     <h2>できごと</h2>
     <ul class="events" id="events"></ul>
+    <div class="kv" id="gstats"></div>
   </section>
 </main>
 
@@ -255,7 +257,9 @@ function drawRGB(canvas, w, h, rgb) {
 function drawEye(e) {
   const c = $('eye'), ctx = c.getContext('2d');
   const bytes = b64(e.rgb), W = e.w, H = e.h;
-  const r = Math.min(c.width / (W + 0.5), c.height / (H * 0.87 + 0.5)) / 2;
+  const r = c.width / (2 * W + 1);
+  const hNeed = Math.ceil(2 * r + (H - 1) * 1.74 * r);
+  if (c.height !== hNeed) c.height = hNeed;
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, c.width, c.height);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const j = (y * W + x) * 3;
@@ -351,6 +355,9 @@ function render(s) {
   fr.querySelector('.bar > div').style.width = Math.min(100, (m.feed_both || 0) * 5) + '%';
   fr.querySelector('.val').textContent = (m.feed_both || 0).toFixed(1);
   $('hunger').textContent = (s.hunger ?? 0).toFixed(2);
+  const rf = s.reflex || {};
+  $('reflex').textContent = !rf.enabled ? '無効' : (rf.active ? '⚠ 作動中（障害物回避）' : `待機（${rf.count ?? 0} 回作動）`);
+  $('reflex').style.color = rf.active ? 'var(--accent)' : '';
   if (document.activeElement !== $('hunger-in')) $('hunger-in').value = s.hunger ?? 0.5;
   const sv = s.senses || {}, sl = s.sense_labels || {};
   rowsInto($('senses'), Object.keys(sl).map(k => [k, sl[k], sv[k] || 0, (sv[k] || 0).toFixed(2)]));

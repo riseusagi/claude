@@ -62,12 +62,14 @@ def load_brain(args):
 def make_fly(args, con, retino):
     from .brain import LIFParams
     from .fly import Fly, FlyConfig
+    from .motor import ReflexParams
 
     lif = LIFParams(dt=args.dt)
     if args.no_std:
         lif.std_U = 0.0
     cfg = FlyConfig(hunger=args.hunger, acuity=args.acuity, retina=args.retina, seed=args.seed,
-                    engine=args.engine, threads=args.threads, lif=lif)
+                    engine=args.engine, threads=args.threads, lif=lif,
+                    reflex=ReflexParams(enabled=not args.no_reflex))
     fly = Fly(con, retino, cfg)
     _log(f"⚙  シミュレーション: {fly.brain.engine} エンジン, dt = {lif.dt} ms"
          + ("" if fly.brain.engine == "numba" else "（pip install numba で数倍速くなります）"))
@@ -78,6 +80,8 @@ def run_session(args, backend, fly) -> None:
     from .runner import Session
 
     session = Session(backend, fly, dt_ms=args.tick, realtime=not args.fast, log=_log)
+    if hasattr(backend, "control_hook"):
+        backend.control_hook = session.control  # チャットからの操作（!fly hunger など）
     httpd = None
     if not args.no_dashboard:
         from .dashboard.server import serve
@@ -238,6 +242,7 @@ def _run_opts(p: argparse.ArgumentParser) -> None:
     g.add_argument("--hunger", type=float, default=0.6, help="初期の空腹度 0〜1（高いほどよく歩く）")
     g.add_argument("--acuity", type=float, default=3.0, help="複眼の解像度 [度]（実際のハエは約 5°）")
     g.add_argument("--retina", action="store_true", help="視細胞も直接駆動する")
+    g.add_argument("--no-reflex", action="store_true", help="胸部神経節の障害物反射を切る（脳だけで動く）")
     g.add_argument("--fov", type=float, default=70.0, help="ゲームの視野角（垂直, 度）")
     g.add_argument("--tick", type=float, default=50.0, help="1 ループで進める時間 [ms]")
     g.add_argument("--fast", action="store_true", help="（内蔵ワールド）実時間に合わせず最速で回す")
