@@ -16,14 +16,27 @@ DPP = 0.15  # 疑似ゲームのマウス感度 [度/px]
 class SimScreen:
     """SimWorld を描画する疑似キャプチャ + それを操作する疑似キーボード・マウス。"""
 
-    def __init__(self, seed=0):
-        self.world = SimWorld(seed=seed, width=192, height=108, n_slimes=0)
+    def __init__(self, seed=0, fov_v=70.0, hud=False):
+        self.world = SimWorld(seed=seed, width=192, height=108, n_slimes=0, fov_v=fov_v)
         self.world.reset()
         self.hwnd, self.region, self.method = None, None, "fake"
         self.keys = set()
         self.log = []
         self.cursor = False  # True = カーソル表示（メニュー中）
         self.menu = False  # True = メニュー・チャット中（マウスで視点が回らない）
+        self.hud = hud  # True = 統合版のように、視点を回しても動かない手・照準・ホットバーを重ねる
+
+    def render(self):
+        f = self.world.render()
+        if self.hud:
+            f = f.copy()
+            H, W = f.shape[:2]
+            f[int(H * 0.55):, int(W * 0.62):int(W * 0.95)] = (200, 150, 110)  # 手
+            f[int(H * 0.62):int(H * 0.75), int(W * 0.7):int(W * 0.8)] = (60, 40, 30)
+            f[H // 2 - 4:H // 2 + 5, W // 2 - 1:W // 2 + 2] = 255  # 照準
+            f[H // 2 - 1:H // 2 + 2, W // 2 - 4:W // 2 + 5] = 255
+            f[int(H * 0.88):, int(W * 0.3):int(W * 0.7)] = (40, 40, 40)  # ホットバー
+        return f
 
     # capture API
     def start(self):
@@ -33,13 +46,13 @@ class SimScreen:
         return (0, 0, 192, 108)
 
     def latest(self):
-        return self.world.render(), time.time()
+        return self.render(), time.time()
 
     def wait_frame(self, after=0.0, timeout=2.0):
-        return self.world.render()
+        return self.render()
 
     def grab(self):
-        return self.world.render()
+        return self.render()
 
     def foreground(self):
         return True
@@ -258,7 +271,7 @@ def test_calibration_handles_low_and_high_mouse_sensitivity(monkeypatch):
 
 
 def test_default_turn_is_fast_enough():
-    """旋回指令 0.25（脳でよく出る大きさ）で 45°/秒、1 px = 0.15° なら 1 秒で 300 px 動かす。"""
+    """旋回指令 0.25（脳でよく出る大きさ）で 30°/秒、1 px = 0.15° なら 1 秒で 200 px 動かす。"""
     dev = _NullInput()
     c = Controller(dev, KeyPolicy(), deg_per_px=0.15)
     t = 0.0
@@ -266,7 +279,7 @@ def test_default_turn_is_fast_enough():
         c.apply(Action(turn=-0.25), t, 0.05)
         t += 0.05
     px = sum(e[1] for e in dev.log if e[0] == "move")
-    assert px == 300
+    assert px == 200
 
 
 def test_stops_when_mouse_does_not_turn_the_view():
@@ -314,3 +327,36 @@ def test_screen_turn_rate_matches_setting():
         be.step(Action(turn=0.25), 0.05)
     dyaw = ((fake.world.player.yaw - yaw0 + 180) % 360) - 180
     assert 70 < dyaw < 110  # 0.25 × 360°/秒 × 1 秒 = 90°（+ = 左）
+
+
+def test_calibration_does_not_depend_on_game_fov():
+    """ゲームの視野角が既定の想定（70°）と違っても、1 回転の測定で感度を正しく測り、視野角も推定する。"""
+    for fov in (55.0, 95.0):
+        fake = SimScreen(seed=1, fov_v=fov)
+        be = make_backend(fake, pitch=8.0)
+        be.reset()
+        assert abs(be.ctl.deg_per_px - DPP) / DPP < 0.02, (fov, be.ctl.deg_per_px)
+        assert abs(be.fov_v - fov) < 10.0, (fov, be.fov_v)
+        assert abs(fake.world.player.pitch - (-8.0)) < 3.0
+
+
+def test_hud_does_not_fool_calibration_or_view_check():
+    """動かない手・照準・ホットバーがあっても較正は狂わず、普通に旋回中に「視点が回らない」と誤判定しない。"""
+    fake = SimScreen(seed=3, hud=True)
+    be = make_backend(fake, pitch=8.0)
+    be.reset()
+    assert abs(be.ctl.deg_per_px - DPP) / DPP < 0.02
+    rng = np.random.default_rng(0)
+    t0 = time.time()
+    turn = 0.0
+    while time.time() - t0 < 6.0:
+        if rng.random() < 0.1:
+            turn = float(rng.choice([0.0, 0.05, -0.1, 0.3, -0.5, 1.0]))
+        be.step(Action(forward=1.0, turn=turn), 0.05)
+        fake.tick()
+        assert be.view.ok, be.view.scores
+    fake.menu = True
+    t0 = time.time()
+    while time.time() - t0 < 5.0:
+        be.step(Action(forward=1.0, turn=0.02), 0.05)
+    assert not be.view.ok and "w" not in fake.keys

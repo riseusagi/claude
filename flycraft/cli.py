@@ -150,7 +150,7 @@ def cmd_sim(args) -> None:
 
     con, retino = load_brain(args)
     fly = make_fly(args, con, retino)
-    world = SimWorld(seed=args.seed or 0, fov_v=args.fov, width=args.width, height=args.height,
+    world = SimWorld(seed=args.seed or 0, fov_v=args.fov or 70.0, width=args.width, height=args.height,
                      n_slimes=args.slimes)
     _log("🌍 内蔵ワールドで開始します（Ctrl+C で終了）")
     run_session(args, world, fly)
@@ -165,7 +165,7 @@ def cmd_bedrock(args) -> None:
 
     con, retino = load_brain(args)
     fly = make_fly(args, con, retino)
-    backend = BedrockWSBackend(host=args.ws_host, port=args.ws_port, fov_v=args.fov,
+    backend = BedrockWSBackend(host=args.ws_host, port=args.ws_port, fov_v=args.fov or 70.0,
                                screen_vision=args.screen_vision, window=args.window, log=_log)
     backend.set_turn_speed(args.turn_speed)
     run_session(args, backend, fly)
@@ -269,7 +269,8 @@ def _run_opts(p: argparse.ArgumentParser) -> None:
     g.add_argument("--acuity", type=float, default=3.0, help="複眼の解像度 [度]（実際のハエは約 5°）")
     g.add_argument("--retina", action="store_true", help="視細胞も直接駆動する")
     g.add_argument("--no-reflex", action="store_true", help="胸部神経節の障害物反射を切る（脳だけで動く）")
-    g.add_argument("--fov", type=float, default=70.0, help="ゲームの視野角（垂直, 度）")
+    g.add_argument("--fov", type=float, default=None,
+                   help="ゲームの視野角（垂直, 度）。既定 70（screen モードは起動時の較正で自動測定）")
     g.add_argument("--tick", type=float, default=50.0, help="1 ループで進める時間 [ms]")
     g.add_argument("--fast", action="store_true", help="（内蔵ワールド）実時間に合わせず最速で回す")
     g.add_argument("--seconds", type=float, default=0, help="脳の時間でこの秒数だけ動かして終了")
@@ -293,7 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
     _run_opts(p)
     p.add_argument("--window", default="Minecraft", help="対象ウィンドウ名（部分一致）")
     p.add_argument("--region", help="キャプチャ範囲 x,y,w,h（ウィンドウが見つからない場合）")
-    p.add_argument("--turn-speed", type=float, default=180.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
+    p.add_argument("--turn-speed", type=float, default=120.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
     p.add_argument("--deg-per-px", type=float, help="マウス 1 px あたりの回転角 [度]（指定すると自動較正しない）")
     p.add_argument("--no-calibrate", action="store_true", help="起動時のマウス較正をしない")
     p.add_argument("--pitch", type=float, default=8.0, help="較正後に視線を水平から何度下げるか（負の値でそのまま）")
@@ -317,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--screen-vision", action="store_true",
                    help="視覚を画面キャプチャから得る（同じ Windows PC で統合版を動かしている場合）")
     p.add_argument("--window", default="Minecraft", help="画面キャプチャするウィンドウ名")
-    p.add_argument("--turn-speed", type=float, default=180.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
+    p.add_argument("--turn-speed", type=float, default=120.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
     p.set_defaults(func=cmd_bedrock)
 
     p = sub.add_parser("probe", help="in silico 実験: ニューロン群を刺激して応答を見る")

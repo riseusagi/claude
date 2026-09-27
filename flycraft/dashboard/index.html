@@ -381,7 +381,7 @@ function render(s) {
     if (document.activeElement !== $('turn-in')) $('turn-in').value = s.turn_deg_s;
     $('turn-val').textContent = `${s.turn_deg_s}°/秒`;
     $('turn-now').textContent = `${s.turn_rate ?? 0}°/秒`;
-    $('mouse-now').textContent = `${s.mouse_px_s ?? 0} px/秒（1 px ≈ ${s.deg_per_px ?? '-'}°）`;
+    $('mouse-now').textContent = `${s.mouse_px_s ?? 0} px/秒（1 px ≈ ${s.deg_per_px ?? '-'}°、視野角 ${s.fov_v ?? '-'}°）`;
     const v = s.view_check || {};
     $('view-now').textContent = v.ok === false ? '⚠ 視点が回らない（メニュー中？）' : 'OK';
     $('view-now').style.color = v.ok === false ? 'var(--accent)' : '';

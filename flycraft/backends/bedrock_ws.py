@@ -43,7 +43,7 @@ SWEET_BELOW = ["honey_block"]
 BITTER_FEET = ["fire", "lava", "wither_rose", "sweet_berry_bush"]
 BITTER_BELOW = ["magma", "cactus"]
 WALK_SPEED = 4.3  # ブロック/秒
-TURN_SPEED = 180.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（既定。120〜240 が目安）
+TURN_SPEED = 120.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（既定。90〜240 が目安）
 
 
 def _uuid() -> str:

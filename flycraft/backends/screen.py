@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -500,7 +500,7 @@ class KeyPolicy:
     jump_hold: float = 0.12  # Space を押している時間 [s]
     jump_cooldown: float = 0.6  # ジャンプの間隔（2 度押しで飛行モードにならないように）[s]
     attack_release: float = 0.3  # 噛む指令が消えてから左クリックを離すまで [s]
-    turn_deg_s: float = 180.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（見やすさ重視。120〜240 が目安）
+    turn_deg_s: float = 120.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（見やすさ重視。90〜240 が目安）
     max_turn_step: float = 60.0  # 1 回で回す角度の上限 [度]
 
 
@@ -594,16 +594,37 @@ def _gray_small(frame: np.ndarray, w: int = 96) -> np.ndarray:
     return g[:h2, :w2].reshape(h2 // k, k, w2 // k, k).mean(axis=(1, 3))
 
 
-def phase_shift(a: np.ndarray, b: np.ndarray) -> Tuple[float, float, float]:
-    """b が a に対して (dx, dy) だけずれている量（位相限定相関）と、ピークの鋭さ。"""
+def phase_corr(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """位相限定相関の相関面。c[dy, dx] が大きいほど b は a を (dx, dy) ずらしたものに近い。"""
     wy = np.hanning(a.shape[0])[:, None]
     wx = np.hanning(a.shape[1])[None, :]
     fa = np.fft.fft2((a - a.mean()) * wy * wx)
     fb = np.fft.fft2((b - b.mean()) * wy * wx)
     r = fb * np.conj(fa)
     r /= np.abs(r) + 1e-9
-    c = np.real(np.fft.ifft2(r))
+    return np.real(np.fft.ifft2(r))
+
+
+def phase_shift(a: np.ndarray, b: np.ndarray, dx_range: Optional[Tuple[float, float]] = None,
+                max_dy: int = 4) -> Tuple[float, float, float]:
+    """b が a に対して (dx, dy) だけずれている量（位相限定相関）と、ピークの鋭さ。
+
+    dx_range を与えると、横ずれがその範囲（縦ずれは ±max_dy）のピークだけを探す。
+    大きくずれると重なりが減ってピークが弱くなり、別の偽のピークに負けやすいため。
+    """
+    c = phase_corr(a, b)
+    if dx_range is not None:
+        h, w = c.shape
+        lo, hi = sorted(dx_range)
+        lo, hi = max(lo, -(w // 2) + 1), min(hi, w // 2 - 1)
+        cols = np.arange(int(math.floor(lo)), int(math.ceil(hi)) + 1)
+        rows = np.arange(-max_dy, max_dy + 1)
+        mask = np.zeros(c.shape, dtype=bool)
+        if len(cols):
+            mask[np.ix_(rows % h, cols % w)] = True
+        c = np.where(mask, c, -np.inf)
     iy, ix = np.unravel_index(int(np.argmax(c)), c.shape)
+    c = np.where(np.isfinite(c), c, 0.0)
     peak = float(c[iy, ix])
     dy = iy if iy <= a.shape[0] // 2 else iy - a.shape[0]
     dx = ix if ix <= a.shape[1] // 2 else ix - a.shape[1]
@@ -700,22 +721,65 @@ class BumpDetector:
         return self.touch
 
 
+class ViewPatch:
+    """回転を測るための画面の一部（灰色・縮小）。
+
+    統合版の画面には視点を回しても動かないもの（右下の手・持っている物、中央の照準、下のホットバー）がある。
+    これが入ると「ずれ 0」の相関が強く出て、回転を小さく見積もったり「回っていない」と
+    誤判定したりするので、手にかからない中央やや左の範囲だけを使う。
+    中央から大きく外れた範囲は遠近の歪み（とくに視線を上下に傾けたとき）で回転を
+    小さく測ってしまうので避ける。この範囲のずれは画面中央のずれとほぼ同じ（テストで確認）。
+    """
+
+    ROWS = ((0.15, 0.44), (0.56, 0.8))  # 中央の照準（+）の行は除く
+    COLS = (0.25, 0.6)
+
+    def __init__(self, frame: np.ndarray, w: int = 192) -> None:
+        g = _gray_small(frame, w=w)
+        h, gw = g.shape
+        c0, c1 = int(gw * self.COLS[0]), int(gw * self.COLS[1])
+        # 上下の帯をつなげる。横にずれればどちらも同じだけずれるので、つなぎ目は横ずれの測定を邪魔しない
+        self.img = np.vstack([g[int(h * r0):int(h * r1), c0:c1] for r0, r1 in self.ROWS])
+        self.W, self.H = frame.shape[1], frame.shape[0]
+        self.scale = frame.shape[1] / gw  # 縮小画像 1 px = 元画像の何 px か
+
+    def deg(self, dx: float, focal: float) -> float:
+        """範囲内のずれ dx [縮小 px] → 視点の回転 [度]（+ = 左を向いた。左を向くと景色は右へずれる）。"""
+        return math.degrees(math.atan(dx * self.scale / focal))
+
+    def shift(self, deg: float, focal: float) -> float:
+        """視点の回転 [度] → 範囲内のずれ [縮小 px]。"""
+        return focal * math.tan(math.radians(float(np.clip(deg, -80, 80)))) / self.scale
+
+
+def focal_px(width: int, height: int, fov_v: float) -> float:
+    """垂直視野角 fov_v の画面の焦点距離 [px]。"""
+    return (height / 2) / math.tan(math.radians(fov_v) / 2)
+
+
 class ViewCheck:
     """マウスを動かしたら視点が回るか（= ゲーム画面か）を画像で確かめる。
 
     統合版ではメニューやチャットでもカーソルの状態で判定できない場合があるため、
     「送ったマウス移動に対して画面が回転したか」を直接見る。ハエがあまり旋回しないときは
-    数秒ごとに小さく（約 3°）左右に振って確かめる。回らなければ入力を止め、
-    回るようになったら再開する。
+    数秒ごとに小さく（約 3°）左右に振って確かめる。
+
+    誤判定で止まらないよう、「回っていない」とみなすのは画面がほぼ静止している
+    （ずれ 0 の相関が強く、期待したずれの位置に相関が無い）ときだけ。景色がのっぺりして
+    測れないときは判定を保留する。ゲームの描画遅れは幅（lags）を持たせて扱う。
     """
 
-    def __init__(self, probe_deg: float = 3.0, probe_every: float = 2.5, lag: float = 0.08) -> None:
+
+    def __init__(self, probe_deg: float = 3.0, probe_every: float = 2.5, probe_hold: float = 0.6) -> None:
         self.probe_deg = probe_deg
         self.probe_every = probe_every
-        self.lag = lag
+        self.probe_hold = probe_hold
+        self.lags = (0.03, 0.08, 0.15, 0.25, 0.35)  # 想定する描画・取り込みの遅れ [s]
+        self.window = 0.8  # 比べる 2 枚の最大の時間差 [s]
         self.total = 0.0  # 送った回転の累計 [度]（+ = 左）
         self.hist = [(0.0, 0.0)]  # (時刻, 累計)
-        self.frames = []  # (時刻, 画面中央の灰色画像, 倍率)
+        self.frames = []  # (時刻, ViewPatch)
+        self.focal = 1.0
         self.ok = True
         self.fails = 0
         self.last_eval = 0.0
@@ -723,6 +787,7 @@ class ViewCheck:
         self.probe_back = None  # (戻す時刻, px)
         self.observed = 0.0
         self.expected = 0.0
+        self.scores = (0.0, 0.0)  # (期待位置の相関, ずれ 0 の相関)
 
     def record_move(self, t: float, deg: float) -> None:
         if deg:
@@ -739,39 +804,82 @@ class ViewCheck:
                 break
         return v
 
+    def set_max_lag(self, lag: float) -> None:
+        """較正で測った描画の遅れに合わせて、想定する遅れの幅と確認の振りの長さを広げる。"""
+        hi = max(0.35, lag + 0.1)
+        self.lags = tuple(float(x) for x in np.linspace(0.03, hi, 5))
+        self.probe_hold = max(0.6, hi + 0.25)
+        self.window = max(0.8, hi + 0.4)
+
     def add_frame(self, t: float, frame: np.ndarray, focal: float) -> None:
         if self.frames and self.frames[-1][0] == t:
             return
-        g = _gray_small(frame, w=192)
-        h, w = g.shape
-        crop = g[int(h * 0.2):int(h * 0.8), int(w * 0.25):int(w * 0.75)]
-        self.frames.append((t, crop, frame.shape[1] / w / focal))
-        self.frames = [f for f in self.frames if f[0] > t - 1.5]
+        self.focal = focal
+        self.frames.append((t, ViewPatch(frame)))
+        self.frames = [f for f in self.frames if f[0] > t - self.window - 0.3]
         self._evaluate(t)
+
+    def _expected(self, t0: float, t1: float) -> List[float]:
+        return [self._turned_at(t1 - lag) - self._turned_at(t0 - lag) for lag in self.lags]
 
     def _evaluate(self, t1: float) -> None:
         if t1 - self.last_eval < 0.25 or len(self.frames) < 3:
             return
         f1 = self.frames[-1]
-        cands = [f for f in self.frames if 0.25 <= t1 - f[0] <= 0.7]
-        if not cands:
+        # 遅れがどの値でも「確実に 2° 以上回したはず」になる、いちばん確かな比較相手を選ぶ
+        # （15° 以下なら回転のずれまで確かめる。それより大きいときは画面が止まっていないかだけ見る）
+        best = None
+        for f in self.frames:
+            if not 0.25 <= t1 - f[0] <= self.window:
+                continue
+            exps = self._expected(f[0], t1)
+            lo, hi = min(exps, key=abs), max(exps, key=abs)
+            if lo * hi <= 0 or abs(lo) < 2.0:
+                continue
+            key = (abs(hi) <= 15.0, abs(lo))
+            if best is None or key > best[0]:
+                best = (key, f, lo, hi)
+        if best is None:
             return
-        f0 = cands[-1]
-        exp = self._turned_at(t1 - self.lag) - self._turned_at(f0[0] - self.lag)
-        if not 2.5 <= abs(exp) <= 20.0:
-            return
+        (small, _), f0, lo, hi = best
         self.last_eval = t1
-        dx, _, peak = phase_shift(f0[1], f1[1])
-        obs = math.degrees(math.atan(dx * f1[2]))  # 左を向くと画面は右へずれる（dx > 0）
-        self.observed, self.expected = obs, exp
         self.last_checked = t1
-        if peak >= 0.05 and obs / exp > 0.3:
+        p0, p1 = f0[1], f1[1]
+        c = phase_corr(p0.img, p1.img)
+        h, w = c.shape
+        static = float(c[np.ix_([r % h for r in (-1, 0, 1)], [x % w for x in (-1, 0, 1)])].max())
+        self.expected = 0.5 * (lo + hi)
+        if not small:
+            # 大きく回したはず: 景色が入れ替わっていれば相関は弱い。ずれ 0 の相関が強ければ止まっている
+            self.scores = (float("nan"), static)
+            self.observed = float("nan")
+            if static < 0.1:
+                self.fails = 0
+                self.ok = True
+            elif static >= 0.25:
+                self.fails += 1
+                if self.fails >= 2:
+                    self.ok = False
+            return
+        # 期待するずれの範囲（視野角の誤差も見込んで広めに）と、ずれ 0 付近の相関を比べる
+        a, b = p1.shift(lo, self.focal), p1.shift(hi, self.focal)
+        s = 1.0 if hi > 0 else -1.0
+        lo_px = max(2.0, 0.6 * min(abs(a), abs(b)))
+        hi_px = min(w / 2 - 1, 1.5 * max(abs(a), abs(b)) + 1)
+        cols = [int(round(s * x)) % w for x in np.arange(lo_px, hi_px + 1e-9, 1.0)]
+        rows = [r % h for r in range(-4, 5)]
+        moving = float(c[np.ix_(rows, cols)].max()) if cols else 0.0
+        dx, _, _ = phase_shift(p0.img, p1.img)
+        self.observed = p1.deg(dx, self.focal)
+        self.scores = (moving, static)
+        if moving >= 0.07 and moving >= 0.15 * static:
             self.fails = 0
             self.ok = True
-        else:
-            self.fails += 1
+        elif static >= 0.2 and moving < min(0.05, 0.25 * static):
+            self.fails += 1  # 画面がほぼ止まっている
             if self.fails >= 2:
                 self.ok = False
+        # それ以外（景色がのっぺりしていて測れない等）は保留
 
     def probe(self, t: float, dev, deg_per_px: float) -> None:
         """必要なら確認のために小さく振る（行って、少しあとで戻す）。"""
@@ -782,12 +890,12 @@ class ViewCheck:
                 self.record_move(t, px * deg_per_px)
                 self.probe_back = None
             return
-        wait = self.probe_every if self.ok else 1.0
+        wait = self.probe_every if self.ok and not self.fails else 1.0
         if t - self.last_checked >= wait:
             px = max(1, int(round(self.probe_deg / max(deg_per_px, 1e-4))))
             dev.move(px, 0)  # 右へ
             self.record_move(t, -px * deg_per_px)
-            self.probe_back = (t + 0.45, px)
+            self.probe_back = (t + self.probe_hold, px)
             self.last_checked = t
 
 
@@ -797,14 +905,15 @@ class ScreenBackend(Backend):
     VK_F8 = 0x77
 
     def __init__(self, window: Optional[str] = "Minecraft", region: Optional[str] = None,
-                 fov_v: float = 70.0, deg_per_px: Optional[float] = None, calibrate: bool = True,
+                 fov_v: Optional[float] = None, deg_per_px: Optional[float] = None, calibrate: bool = True,
                  pitch: Optional[float] = 8.0, cursor_check: bool = True, countdown: float = 3.0,
                  policy: Optional[KeyPolicy] = None, capture=None, input_device=None, check_view: bool = True,
                  log: Callable[[str], None] = print) -> None:
         self.cap = capture or ScreenCapture(window, region)
         self.dev = input_device or make_input()
         self.ctl = Controller(self.dev, policy, deg_per_px or 0.15)
-        self.fov_v = fov_v
+        self.fov_v = fov_v or 70.0  # 垂直視野角。指定が無ければ較正で測る
+        self.fov_auto = fov_v is None
         self.calibrate = calibrate and deg_per_px is None
         self.target_pitch = pitch
         self.cursor_check = cursor_check
@@ -818,6 +927,7 @@ class ScreenBackend(Backend):
         self.events = []
         self._t_last = time.perf_counter()
         self._t_step = 0.0
+        self._lag = 0.1  # マウスを動かしてから画面が変わるまでの遅れ [s]（較正中に測る）
         self._walk_since = None
         self._was_active = None
         self.turn_rate = 0.0  # 実際に回している速さ [度/秒]
@@ -889,57 +999,157 @@ class ScreenBackend(Backend):
             time.sleep(0.2)
         return False
 
-    def _measure_dpp(self) -> Optional[float]:
-        """マウスを左右に動かし、画面中央部のずれから 1 px あたりの回転角を測る。"""
-        frame = self.cap.wait_frame(after=time.time())
-        H, W = frame.shape[:2]
-        fov_h = math.degrees(2 * math.atan(math.tan(math.radians(self.fov_v) / 2) * W / H))
-        focal = (W / 2) / math.tan(math.radians(fov_h) / 2)
+    def _move_x(self, n: int, pieces: int = 6, pause: float = 0.02) -> None:
+        """マウスを横に n px（+ = 右）動かす。実際のプレイと同じく小刻みに送る。"""
+        sign = 1 if n > 0 else -1
+        left = abs(int(n))
+        chunk = max(1, left // pieces)
+        while left > 0:
+            step = min(chunk, left)
+            self.dev.move(sign * step, 0)
+            left -= step
+            time.sleep(pause)
 
-        def center(img):
-            g = _gray_small(img, w=192)
-            h, w = g.shape
-            return g[int(h * 0.2):int(h * 0.8), int(w * 0.25):int(w * 0.75)], W / g.shape[1]
+    def _patch(self, settle: float, before: Optional[ViewPatch] = None, timeout: float = 1.2) -> ViewPatch:
+        """マウス移動が画面に反映されて落ち着いた画面。
 
-        def turn_and_measure(n: int, sign: int):
-            """マウスを横に n px 動かし、画面の回転角 [度] を測る（測れなければ None）。"""
-            a, k = center(self.cap.wait_frame(after=time.time() + 0.05))
-            chunk = max(1, n // 6)  # 実際のプレイと同じく小刻みに動かす
-            left = n
-            while left > 0:
-                step = min(chunk, left)
-                self.dev.move(sign * step, 0)
-                left -= step
-                time.sleep(0.02)
-            b, _ = center(self.cap.wait_frame(after=time.time() + 0.25))
-            dx, dy, peak = phase_shift(a, b)
-            ang = math.degrees(math.atan(abs(dx) * k / focal))
-            if peak < 0.05 or (dx < 0) != (sign > 0):  # 右を向けば画面は左へずれる
-                return None
-            return ang
+        ゲームが重いとマウスを動かしてから画面が変わるまでに遅れがあるので、
+        before（動かす前の画面）があればそれと変わるまで待ってから、続けて撮った 2 枚が
+        ほぼ同じになるまで待つ。before が無いときは、測った遅れより長い間隔で 2 枚が
+        同じになるまで待つ（遅れて届く変化を見逃さないように）。水面や動物などで
+        画面が動き続けるときは timeout 秒で打ち切る。
+        """
+        def same(x: ViewPatch, y: ViewPatch) -> bool:
+            contrast = float(np.abs(y.img - y.img.mean()).mean()) + 1.0
+            return float(np.abs(x.img - y.img).mean()) < 0.03 * contrast
 
+        t_start = time.time()
+        t_settle = t_start + settle
+        end = t_settle + timeout
+        gap = 0.06 if before is not None else self._lag + 0.06
+        prev = ViewPatch(self.cap.wait_frame(after=t_settle))
+        moved = before is None or not same(before, prev)
+        if before is not None and moved:
+            self._lag = min(0.6, max(self._lag, time.time() - t_start))
+        while time.time() < end:
+            cur = ViewPatch(self.cap.wait_frame(after=time.time() + (0.03 if not moved else gap)))
+            if not moved:
+                moved = not same(before, cur)
+                if moved:
+                    self._lag = min(0.6, max(self._lag, time.time() - t_start))  # 実際の描画遅れ
+                elif time.time() > t_start + self._lag + 0.5:
+                    return cur  # 動かした量が小さすぎて画面が変わらない
+                prev = cur
+                continue
+            if same(prev, cur):
+                return cur
+            prev = cur
+        return prev
+
+    def _focal(self) -> Tuple[float, int, int]:
+        H, W = self.cap.wait_frame(after=0.0).shape[:2]
+        return focal_px(W, H, self.fov_v), W, H
+
+    def _turn_and_measure(self, n: int, focal: float, guess: Optional[float] = None):
+        """マウスを横に n px 動かし、(回転角 [度, 仮定の視野角で], 範囲内のずれ, 範囲) を返す（測れなければ None）。
+
+        guess（1 px あたりの回転角の見積もり）があれば、その前後のずれだけを探す。
+        """
+        a = self._patch(0.05)
+        self._move_x(n)
+        b = self._patch(0.1, before=a)
+        rng = None
+        if guess is not None:
+            e = b.shift(-n * guess, focal)  # 右へ動かす（n > 0）と右を向く = 左回りは負
+            rng = (0.4 * e, 2.0 * e)
+        dx, dy, peak = phase_shift(a.img, b.img, rng)
+        if peak < 0.05 or (dx < 0) != (n > 0):  # 右を向けば景色は左へずれる
+            return None
+        return abs(b.deg(dx, focal)), dx, b
+
+    def _measure_dpp(self) -> Tuple[Optional[float], list]:
+        """左右に動かしたときの画面のずれから 1 px あたりの回転角を見積もる（視野角の仮定に依存）。"""
+        focal, _, _ = self._focal()
         # 1) 小さく動かして大まかな感度をつかむ（感度が高くても低くても測れるように）
         guess = None
-        for n in (12, 48, 192, 768, 3072):
-            ang = turn_and_measure(n, 1)
-            turn_and_measure(n, -1)
-            if ang is not None and ang >= 1.5:
-                guess = ang / n
+        # 4 倍ずつ増やすので、初めて 1.5° を超えたときの回転はせいぜい 6°（大きく回すと測り違えやすい）
+        for n in (3, 12, 48, 192, 768, 3072):
+            r = self._turn_and_measure(n, focal)
+            self._turn_and_measure(-n, focal)
+            if r is not None and r[0] >= 1.5:
+                guess = r[0] / n
                 break
         if guess is None:
-            return None
-        # 2) 約 8° 回る量で左右 2 往復して精密に測る
-        n = int(np.clip(round(8.0 / guess), 4, 20000))
-        results = []
-        for sign in (1, -1, 1, -1):
-            ang = turn_and_measure(n, sign)
-            if ang is not None and ang > 0.3:
-                results.append(ang / n)
-        if len(results) >= 2:
-            dpp = float(np.median(results))
+            return None, []
+        # 2) 約 6° 回る量で左右 2 往復して精度を上げる
+        _, samples = self._measure_dpp_at(guess)
+        if len(samples) >= 2:
+            dpp = float(np.median([s[1] / abs(s[0]) for s in samples]))
             if 0.0005 < dpp < 10.0:
-                return dpp
-        return None
+                return dpp, samples
+        return (guess if 0.0005 < guess < 10.0 else None), samples
+
+    def _spin_dpp(self, guess: float) -> Optional[float]:
+        """1 回転して最初と同じ景色に戻るまでのマウス移動量から、1 px あたりの回転角を正確に測る。
+
+        画面のずれを角度に直す必要がないので、ゲームの視野角の設定に左右されない。
+        """
+        focal, _, _ = self._focal()
+        ref = self._patch(0.2)
+        w = ref.img.shape[1]
+        step = max(1, int(round(12.0 / guess)))  # 約 12° ずつ
+        # 見積もりは視野角の仮定しだいで 0.55〜1.8 倍ほどずれうるので、その範囲を探す
+        total = int(0.5 * 360 / guess / step) * step
+        self._move_x(total, pieces=max(1, total // step), pause=0.01)  # 半回転ぶんは一気に回す
+        cands = []
+        p = self._patch(0.05, before=ref)
+        while total * guess < 1.85 * 360:
+            self._move_x(step, pieces=2, pause=0.01)
+            total += step
+            p = self._patch(0.05, before=p)
+            # 少し（刻みの半分程度）ずれていても「同じ景色」と分かるよう、ずれを許す相関で比べる
+            _, _, sim = phase_shift(ref.img, p.img, (-w / 3, w / 3))
+            cands.append((sim, total))
+        sims = np.array([c[0] for c in cands])
+        # 最初に戻ってきた所（ちょうど 1 回転）。2 回転目の一致と取り違えないよう、最初の山を選ぶ
+        good = sims > max(0.1, 2.5 * float(np.median(sims)))
+        k = None
+        for i in np.flatnonzero(good):
+            k = int(i)
+            while k + 1 < len(sims) and good[k + 1] and sims[k + 1] > sims[k]:
+                k += 1
+            break
+        if k is None:
+            return None
+        # いちばん似ていた向きまで戻り、描画が落ち着いてから残りのずれを測る
+        at = cands[k][1]
+        back = total - at
+        self._move_x(-back, pieces=max(1, back // step), pause=0.01)
+        dpp = guess
+        before = p if back else None
+        for _ in range(2):  # 残りのずれを回して詰め、もう一度測る（視野角の誤差の影響をさらに小さく）
+            p = self._patch(0.1, before=before)
+            dx, _, peak = phase_shift(ref.img, p.img, (-w / 3, w / 3))
+            theta = p.deg(dx, focal)  # 最初の向きより左に何度か
+            if peak < 0.1 or abs(theta) > 12.0:
+                return None
+            dpp = (360.0 - theta) / at
+            fix = int(round(theta / dpp))
+            if not fix:
+                break
+            self._move_x(fix, pieces=1)
+            at += fix
+            before = p
+        return dpp if 0.5 * guess < dpp < 2.0 * guess else None
+
+    @staticmethod
+    def _estimate_fov(samples: list, dpp: float, H: int) -> Optional[float]:
+        """回した角度（正確な感度から）と画面のずれから、垂直視野角 [度] を求める。"""
+        fs = [abs(dx) * patch.scale / math.tan(math.radians(abs(n) * dpp)) for n, _, dx, patch in samples if dx]
+        if len(fs) < 2:
+            return None
+        fov = math.degrees(2 * math.atan((H / 2) / float(np.median(fs))))
+        return fov if 30.0 <= fov <= 125.0 else None
 
     def _level_pitch(self) -> None:
         """真下を向いてから決まった角度だけ上げる（ピッチは ±90° で止まる）。"""
@@ -956,24 +1166,60 @@ class ScreenBackend(Backend):
         time.sleep(0.15)
 
     def _calibrate(self) -> None:
-        """マウス 1 px あたりの回転角を測り、視線を水平付近にそろえる（2 回繰り返して精度を上げる）。"""
+        """マウス 1 px あたりの回転角（と視野角）を測り、視線を水平付近にそろえる。"""
         if not self._wait_active():
             self.log("   ⚠ 較正をスキップ（ゲーム画面になりませんでした）。--deg-per-px で指定もできます")
             return
-        ok = False
-        for rnd in range(2):
-            dpp = self._measure_dpp()
-            if dpp is not None:
-                self.ctl.deg_per_px = dpp
-                ok = True
-            if self.target_pitch is not None and self._wait_active(5.0):
-                self._level_pitch()
-        if ok:
-            self.log(f"🖱  マウス較正: 1 px ≈ {self.ctl.deg_per_px:.3f}°（旋回 1.0 = {self.ctl.p.turn_deg_s:.0f}°/秒）")
+        level = self.target_pitch is not None
+        rough, _ = self._measure_dpp()
+        if rough is not None:
+            self.ctl.deg_per_px = rough
+        if level and self._wait_active(5.0):
+            self._level_pitch()  # 空や足元を向いたままだと 1 回転の測定がしにくい
+        if rough is not None:
+            self.log("   マウス感度を正確に測るため、視点を 1 回転させます…")
+        exact = self._spin_dpp(rough) if rough is not None and self._wait_active(5.0) else None
+        fov_msg = ""
+        if exact is not None:
+            self.ctl.deg_per_px = exact
+            if self.fov_auto and self._wait_active(5.0):
+                _, _, H = self._focal()
+                _, samples = self._measure_dpp_at(exact)
+                fov = self._estimate_fov(samples, exact, H)
+                if fov is not None:
+                    self.fov_v = fov
+                    fov_msg = f"、視野角 ≈ {fov:.0f}°（垂直）"
+        elif self._wait_active(5.0):
+            again, _ = self._measure_dpp()  # 水平に近い向きでもう一度
+            if again is not None:
+                self.ctl.deg_per_px = again
+        if level and self._wait_active(5.0):
+            self._level_pitch()
+        if exact is not None:
+            self.log(f"🖱  マウス較正（1 回転で測定）: 1 px ≈ {self.ctl.deg_per_px:.4f}°{fov_msg}"
+                     f"（旋回 1.0 = {self.ctl.p.turn_deg_s:.0f}°/秒）")
+        elif rough is not None:
+            self.log(f"🖱  マウス較正: 1 px ≈ {self.ctl.deg_per_px:.4f}°（旋回 1.0 = {self.ctl.p.turn_deg_s:.0f}°/秒）")
+            self.log("   ⚠ 1 回転での精密測定ができなかったため、視野角 {:.0f}° を仮定した見積もりです。"
+                     "旋回の速さがずれる場合は --fov でゲームの視野角を指定してください".format(self.fov_v))
         else:
             self.log(f"   ⚠ マウス較正に失敗しました。1 px = {self.ctl.deg_per_px:.3f}° として続けます（--deg-per-px で指定可）")
-        if self.target_pitch is not None:
+        if level:
             self.log(f"   視線を水平から {self.target_pitch:.0f}° 下にそろえました")
+        self.view.set_max_lag(self._lag)
+        if self._lag > 0.25:
+            self.log(f"   （マウスを動かしてから画面が変わるまで約 {self._lag:.2f} 秒かかっています）")
+
+    def _measure_dpp_at(self, dpp: float) -> Tuple[float, list]:
+        """感度の見積もり dpp で約 6° ずつ左右に振り、画面のずれを記録する。"""
+        focal, _, _ = self._focal()
+        n = int(np.clip(round(6.0 / dpp), 4, 200000))
+        samples = []
+        for sign in (1, -1, 1, -1):
+            r = self._turn_and_measure(sign * n, focal, dpp)
+            if r is not None and r[0] > 0.3:
+                samples.append((sign * n, r[0], r[1], r[2]))
+        return dpp, samples
 
     # ---------------------------------------------------------------- loop
     def _observe(self, dt: float) -> Observation:
@@ -985,8 +1231,7 @@ class ScreenBackend(Backend):
         fov_h = math.degrees(2 * math.atan(math.tan(math.radians(self.fov_v) / 2) * frame.shape[1] / frame.shape[0]))
         touch = self.bump.update(frame, t, walking, dt, self.ctl.turned_deg, fov_h)
         if self.check_view:
-            focal = (frame.shape[1] / 2) / math.tan(math.radians(fov_h) / 2)
-            self.view.add_frame(t, frame, focal)
+            self.view.add_frame(t, frame, focal_px(frame.shape[1], frame.shape[0], self.fov_v))
         return Observation(frame=frame, fov_v=self.fov_v, touch_left=touch, touch_right=touch,
                            info={"状態": self.status, "キー": "".join(k.upper() for k, v in self.ctl.pressed().items() if v),
                                  "視差": round(self.bump.residual, 3)})
@@ -1045,7 +1290,7 @@ class ScreenBackend(Backend):
         return {"status": self.status, "events": list(self.events[-8:]),
                 "keys": self.ctl.pressed(), "deg_per_px": round(self.ctl.deg_per_px, 4),
                 "turn_deg_s": round(self.ctl.p.turn_deg_s), "turn_rate": round(self.turn_rate),
-                "mouse_px_s": round(self.px_rate),
+                "mouse_px_s": round(self.px_rate), "fov_v": round(self.fov_v),
                 "view_check": {"ok": self.view.ok, "expected": round(self.view.expected, 1),
                                "observed": round(self.view.observed, 1)}}
 
