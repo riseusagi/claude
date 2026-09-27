@@ -168,6 +168,7 @@ class Fly:
             "active": int((self.last_counts > 0).sum()),
             "classes": self.class_activity(),
             "realtime": round(self.realtime_factor(), 2),
+            "threads": self.brain.threads,
             "brain_t": round(self.brain.t_ms / 1000.0, 2),
             "opto": dict(self.opto),
             "vpn_driven": self.vpn.n_driven if self.vpn else 0,

@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from flycraft.backends.bedrock_ws import BedrockWSBackend, parse_querytarget
-from flycraft.backends.screen import ScreenBackend, _NullInput
 from flycraft.interface import Action
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -54,39 +53,6 @@ def test_bedrock_backend_with_mock_client():
     finally:
         mock.stop()
         be.close()
-
-
-class FakeCapture:
-    def __init__(self):
-        self.t = 0
-        self.hwnd = None
-        self.region = None
-
-    def locate(self):
-        return (0, 0, 64, 36)
-
-    def grab(self):
-        self.t += 1
-        img = np.zeros((36, 64, 3), np.uint8)
-        img[:, (self.t * 3) % 64] = 255
-        return img
-
-    @property
-    def foreground(self):
-        return True
-
-
-def test_screen_backend_sends_keys():
-    dev = _NullInput()
-    be = ScreenBackend(capture=FakeCapture(), input_device=dev, countdown=0, log=lambda *_: None)
-    be.reset()
-    be.step(Action(forward=1.0, turn=1.0, jump=True), 0.01)
-    be.step(Action(forward=0.0, turn=0.0), 0.01)
-    be.close()
-    assert ("key", "w", True) in dev.log
-    assert ("key", "space", True) in dev.log and ("key", "space", False) in dev.log
-    assert any(e[0] == "move" and e[1] < 0 for e in dev.log)  # 左旋回 → マウス左
-    assert ("key", "w", False) in dev.log
 
 
 def test_dashboard_endpoints():

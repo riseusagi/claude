@@ -88,6 +88,7 @@
     <span class="chip">脳の時間 <b id="st-t">0</b> s</span>
     <span class="chip">速度 <b id="st-rt">-</b> × 実時間</span>
     <span class="chip">ループ <b id="st-hz">-</b> Hz</span>
+    <span class="chip">スレッド <b id="st-th">-</b></span>
     <span class="chip">スパイク <b id="st-sp">0</b> /tick</span>
     <span class="chip">発火中 <b id="st-act">0</b> 個</span>
   </div>
@@ -321,10 +322,12 @@ function render(s) {
   $('st-t').textContent = (s.brain_t ?? 0).toFixed(1);
   $('st-rt').textContent = s.realtime ?? '-';
   $('st-hz').textContent = s.loop_hz ?? '-';
+  $('st-th').textContent = s.threads ?? '-';
   $('st-sp').textContent = (s.spikes ?? 0).toLocaleString();
   $('st-act').textContent = (s.active ?? 0).toLocaleString();
   $('st-err').textContent = s.error || '';
-  $('st-status').textContent = s.status || '';
+  $('st-status').textContent = s.status ? `状態: ${s.status}` : '';
+  $('st-status').style.color = s.status && s.status !== '操作中' ? 'var(--accent)' : '';
   if (s.frame) drawRGB($('game'), s.frame.w, s.frame.h, s.frame.rgb);
   if (s.eye) { drawEye(s.eye); if (s.motion) drawMotion(s.motion, s.eye.w, s.eye.h); }
   if (s.info) {
@@ -333,12 +336,13 @@ function render(s) {
     $('health').textContent = i.health !== undefined ? `${i.health} / 20` : '-';
   }
   const a = s.action || {};
-  $('k-fwd').classList.toggle('on', a.forward > 0.15);
-  $('k-back').classList.toggle('on', a.forward < -0.15);
+  const k = s.keys;  // 画面モード: 実際に送っているキー
+  $('k-fwd').classList.toggle('on', k ? !!k.w : a.forward > 0.15);
+  $('k-back').classList.toggle('on', k ? !!k.s : a.forward < -0.15);
   $('k-left').classList.toggle('on', a.turn > 0.15);
   $('k-right').classList.toggle('on', a.turn < -0.15);
-  $('k-jump').classList.toggle('on', !!a.jump);
-  $('k-bite').classList.toggle('on', !!a.attack);
+  $('k-jump').classList.toggle('on', k ? !!k.space : !!a.jump);
+  $('k-bite').classList.toggle('on', k ? !!k.mouse : !!a.attack);
   $('k-none').classList.toggle('on', Math.abs(a.forward || 0) <= 0.15 && Math.abs(a.turn || 0) <= 0.15);
   const m = s.motor || {}, L = s.motor_labels || {};
   const motorEl = $('motor');

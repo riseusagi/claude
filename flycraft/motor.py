@@ -141,6 +141,9 @@ class ObstacleReflex:
         self.timer = 0.0
         self.direction = 0.0
         self.count = 0
+        self._t = 0.0
+        self._last = -1e9
+        self._climb = False
 
     @property
     def active(self) -> bool:
@@ -150,9 +153,13 @@ class ObstacleReflex:
         if not self.p.enabled:
             return action
         tl, tr = obs.touch_left, obs.touch_right
+        self._t += dt
         if self.timer > 0:
             self.timer -= dt
-            return Action(forward=-0.3, turn=self.direction, jump=action.jump, attack=action.attack)
+            # 続けて詰まったときは、最初に跳んで段差・穴からの脱出を試みる
+            jump = action.jump or (self._climb and self.timer > self.p.turn_time - 0.25)
+            return Action(forward=-0.3 if not self._climb else 0.6, turn=self.direction,
+                          jump=jump, attack=action.attack)
         if max(tl, tr) > 0.3 and action.forward > 0.2:
             self.push += dt
         else:
@@ -161,6 +168,8 @@ class ObstacleReflex:
             self.push = 0.0
             self.timer = self.p.turn_time
             self.count += 1
+            self._climb = self._t - self._last < 3.0  # 3 秒以内に再び詰まった
+            self._last = self._t
             if abs(tl - tr) > 0.1:
                 self.direction = -1.0 if tl > tr else 1.0  # 触れた側と反対へ（+ = 左）
             else:

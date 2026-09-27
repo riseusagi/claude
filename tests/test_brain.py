@@ -87,3 +87,28 @@ def test_numba_and_numpy_engines_are_identical():
         c0, c1 = bs[0].run(5.0), bs[1].run(5.0)
         assert np.array_equal(c0, c1)
         assert np.allclose(bs[0].v, bs[1].v, atol=1e-3)
+
+
+@pytest.mark.skipif(not HAVE_NUMBA, reason="numba が無い")
+def test_lazy_engine_matches_reference():
+    """遅延評価版（入力が来たニューロンと閾値に届きうるものだけ積分）も同じスパイクを出す。"""
+    con = random_net(n=3000, m=40000)
+    bs = [Brain(con, engine=e, seed=5) for e in ("numba-lazy", "numpy")]
+    for b in bs:
+        b.v[:10] = -40.0
+        b.set_drive(np.arange(40), np.full(40, 60.0))
+        b.set_bias(np.arange(100, 105), 9.0)
+    for _ in range(40):
+        assert np.array_equal(bs[0].run(5.0), bs[1].run(5.0))
+    assert np.allclose(bs[0].v, bs[1].v, atol=0.1)
+
+
+def test_thread_tuner_picks_fastest():
+    from flycraft.brain import ThreadTuner
+
+    t = ThreadTuner(8, trial_ms=100.0, revisit_ms=1e9)
+    cost = {1: 1.6, 2: 1.0, 3: 1.2, 4: 1.3, 6: 2.0, 8: 7.0}
+    th = t.current
+    for _ in range(40):
+        th = t.record(cost[th] * 0.05, 50.0)
+    assert th == 2

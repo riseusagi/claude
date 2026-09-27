@@ -43,6 +43,8 @@ class Session:
         self.loop_hz = 0.0
         self.tick = 0
         self.error: Optional[str] = None
+        self._t_prev: Optional[float] = None
+        self.last_dt_ms = dt_ms
 
     # ------------------------------------------------------------- control
     def start(self) -> None:
@@ -85,7 +87,15 @@ class Session:
         """1 ステップ（テストやヘッドレス実行用）。"""
         if self.obs is None:
             self.obs = self.backend.reset()
-        self.action = self.fly.step(self.obs, self.dt_ms)
+        dt_ms = self.dt_ms
+        now = time.perf_counter()
+        if self.backend.realtime and self._t_prev is not None:
+            # 実時間で動くゲームでは、前回からの経過時間ぶん脳を進める（脳の時間 = 実時間）。
+            # 脳が遅いと 1 回の刻みが大きくなるが、上限（2 倍）で止めて遅れを溜めない。
+            dt_ms = float(np.clip((now - self._t_prev) * 1000.0, self.dt_ms, 2 * self.dt_ms))
+        self._t_prev = now
+        self.last_dt_ms = dt_ms
+        self.action = self.fly.step(self.obs, dt_ms)
         self.obs = self.backend.step(self.action, self.dt_ms / 1000.0)
         self.tick += 1
         return self.action

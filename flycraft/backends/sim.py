@@ -314,6 +314,7 @@ class SimWorld(Backend):
         self._sugar = 0.0
         self._bitter = 0.0
         self._touch = [0.0, 0.0]
+        self.view_offset = [0.0, 0.0, 0.0, 0.0, 0.0]  # カメラのずれ (x, y, z, yaw, pitch)。視点の揺れの再現用
         self.reset()
 
     # ------------------------------------------------------------- helpers
@@ -336,6 +337,20 @@ class SimWorld(Backend):
         solid = np.flatnonzero(SOLID[col] | (col == WATER))
         return int(solid.max()) + 1 if len(solid) else 1
 
+    def _open_spot(self, x: int, y: int, z: int) -> bool:
+        """地面があり、頭上が開けていて、周囲の半分以上へ歩いて（または 1 段登って）出られる場所。"""
+        w = self.world
+        if y + 4 >= w.shape[1] or w[x, y - 1, z] not in (GRASS, SAND, DIRT):
+            return False
+        if SOLID[w[x, y:y + 4, z]].any():
+            return False
+        free = 0
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            col = w[x + dx, :, z + dz]
+            if not SOLID[col[y:y + 2]].any() or (not SOLID[col[y + 1:y + 4]].any()):
+                free += 1
+        return free >= 5
+
     def _spawn_point(self):
         c = self.size // 2
         for r in range(0, self.size // 2 - 2):
@@ -343,8 +358,7 @@ class SimWorld(Backend):
                 x = int(np.clip(c + self.rng.integers(-r, r + 1), 2, self.size - 3))
                 z = int(np.clip(c + self.rng.integers(-r, r + 1), 2, self.size - 3))
                 y = self._surface_y(x, z)
-                if self.world[x, y - 1, z] in (GRASS, SAND, DIRT) and self.world[x, y, z] == AIR \
-                        and self.world[x, y + 1, z] == AIR:
+                if self._open_spot(x, y, z):
                     return x + 0.5, float(y), z + 0.5
         return c + 0.5, 20.0, c + 0.5
 
@@ -391,7 +405,7 @@ class SimWorld(Backend):
                 p.x, p.z = nx, nz
             elif self.auto_step and p.on_ground and not self._collides(nx, p.y + 1.0, nz) \
                     and not self._collides(p.x, p.y + 1.0, p.z):
-                p.vy = JUMP_V * 0.93
+                p.vy = JUMP_V
                 p.on_ground = False
                 bumped = True
             else:
@@ -447,8 +461,11 @@ class SimWorld(Backend):
             self.stats["jumps"] += 1
         # 重力
         g = GRAVITY * (0.3 if in_water else 1.0)
-        p.vy = max(p.vy - g * dt, -40.0 if not in_water else -3.0)
-        ny = p.y + p.vy * dt
+        # 放物運動を厳密に積分する（粗い刻みでもジャンプの高さが変わらないように）
+        vmin = -40.0 if not in_water else -3.0
+        v0 = p.vy
+        p.vy = max(v0 - g * dt, vmin)
+        ny = p.y + (v0 + p.vy) * 0.5 * dt
         if self._collides(p.x, ny, p.z):
             if p.vy < 0:
                 fall = -p.vy
@@ -573,7 +590,8 @@ class SimWorld(Backend):
     # ------------------------------------------------------------ observation
     def _camera_dirs(self) -> np.ndarray:
         p = self.player
-        a, b = math.radians(p.yaw), math.radians(p.pitch)
+        vo = self.view_offset
+        a, b = math.radians(p.yaw + vo[3]), math.radians(p.pitch + vo[4])
         # カメラ座標 → ワールド: 前 f, 右 r, 上 u
         f = np.array([math.sin(a) * math.cos(b), math.sin(b), math.cos(a) * math.cos(b)])
         r = np.array([-math.cos(a), 0.0, math.sin(a)])
@@ -584,7 +602,8 @@ class SimWorld(Backend):
 
     def render(self) -> np.ndarray:
         p = self.player
-        ox, oy, oz = p.x, p.y + EYE, p.z
+        vo = self.view_offset
+        ox, oy, oz = p.x + vo[0], p.y + EYE + vo[1], p.z + vo[2]
         dirs = self._camera_dirs()
         if HAVE_NUMBA:
             ht, hb, hf = _render_nb(self.world, ox, oy, oz, dirs, self.max_dist)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -58,12 +59,18 @@ def load_brain(args):
     return con, retino
 
 
+def resolve_dt(args) -> float:
+    if getattr(args, "dt", None):
+        return float(args.dt)
+    return 1.0 if getattr(args, "cmd", "") == "screen" else 0.5
+
+
 def make_fly(args, con, retino):
     from .brain import LIFParams
     from .fly import Fly, FlyConfig
     from .motor import ReflexParams
 
-    lif = LIFParams(dt=args.dt)
+    lif = LIFParams(dt=resolve_dt(args))
     if args.no_std:
         lif.std_U = 0.0
     cfg = FlyConfig(hunger=args.hunger, acuity=args.acuity, retina=args.retina, seed=args.seed,
@@ -79,6 +86,8 @@ def run_session(args, backend, fly) -> None:
     from .runner import Session
 
     session = Session(backend, fly, dt_ms=args.tick, realtime=not args.fast, log=_log)
+    if backend.realtime and not args.threads:
+        fly.brain.autotune()  # ゲームと CPU を分け合うので、速いスレッド数を自動で選ぶ
     if hasattr(backend, "control_hook"):
         backend.control_hook = session.control  # チャットからの操作（!fly hunger など）
     httpd = None
@@ -160,7 +169,10 @@ def cmd_screen(args) -> None:
     con, retino = load_brain(args)
     fly = make_fly(args, con, retino)
     backend = ScreenBackend(window=args.window, region=args.region, fov_v=args.fov,
-                            mouse_speed=args.mouse_speed, log=_log)
+                            deg_per_px=args.deg_per_px, calibrate=not args.no_calibrate,
+                            pitch=None if args.pitch < 0 else args.pitch,
+                            cursor_check=not args.no_cursor_check, log=_log)
+    backend.ctl.p.turn_deg_s = args.turn_speed
     run_session(args, backend, fly)
 
 
@@ -182,7 +194,7 @@ def cmd_probe(args) -> None:
     if not len(idx):
         _log(f"該当するニューロンがありません: {sel}")
         sys.exit(1)
-    lif = LIFParams(dt=args.dt)
+    lif = LIFParams(dt=resolve_dt(args))
     if args.no_std:
         lif.std_U = 0.0
     brain = Brain(con, lif, engine=args.engine, seed=args.seed)
@@ -214,7 +226,7 @@ def cmd_bench(args) -> None:
     from .brain import Brain, LIFParams
 
     con, _ = load_brain(args)
-    brain = Brain(con, LIFParams(dt=args.dt), engine=args.engine, seed=0, threads=args.threads)
+    brain = Brain(con, LIFParams(dt=resolve_dt(args)), engine=args.engine, seed=0, threads=args.threads)
     idx = con.select(super_class="visual_projection")[::4]
     brain.set_drive(idx, np.full(len(idx), 30.0))
     brain.run(20)
@@ -229,9 +241,10 @@ def _common(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("脳")
     g.add_argument("--toy", action="store_true", help="FlyWire の代わりにトイ・コネクトーム（人工回路）を使う")
     g.add_argument("--data-dir", help="データの置き場所（既定: ~/.cache/flycraft、環境変数 FLYCRAFT_DATA）")
-    g.add_argument("--engine", default="auto", choices=["auto", "numba", "numpy"])
+    g.add_argument("--engine", default="auto", choices=["auto", "numba", "numba-lazy", "numpy"])
     g.add_argument("--threads", type=int, help="numba のスレッド数")
-    g.add_argument("--dt", type=float, default=0.5, help="積分ステップ [ms]（1.0 にすると約 2 倍速い）")
+    g.add_argument("--dt", type=float, default=None,
+                   help="積分ステップ [ms]。既定 0.5（screen モードは 1.0: ゲームと CPU を分け合うため）")
     g.add_argument("--no-std", action="store_true", help="短期シナプス抑圧を無効化（元の Shiu et al. モデル）")
     g.add_argument("--seed", type=int, default=None)
 
@@ -284,7 +297,12 @@ def build_parser() -> argparse.ArgumentParser:
     _run_opts(p)
     p.add_argument("--window", default="Minecraft", help="対象ウィンドウ名（部分一致）")
     p.add_argument("--region", help="キャプチャ範囲 x,y,w,h（ウィンドウが見つからない場合）")
-    p.add_argument("--mouse-speed", type=float, default=6.0, help="旋回 1.0 あたりのマウス移動量 [px/tick]")
+    p.add_argument("--turn-speed", type=float, default=150.0, help="旋回指令 1.0 のときの回転速度 [度/秒]")
+    p.add_argument("--deg-per-px", type=float, help="マウス 1 px あたりの回転角 [度]（指定すると自動較正しない）")
+    p.add_argument("--no-calibrate", action="store_true", help="起動時のマウス較正をしない")
+    p.add_argument("--pitch", type=float, default=8.0, help="較正後に視線を水平から何度下げるか（負の値でそのまま）")
+    p.add_argument("--no-cursor-check", action="store_true",
+                   help="カーソル表示中（メニュー画面）でも入力する。判定がうまくいかないときだけ使う")
     p.set_defaults(func=cmd_screen)
 
     p = sub.add_parser("probe", help="in silico 実験: ニューロン群を刺激して応答を見る")
@@ -310,6 +328,11 @@ def main(argv: Optional[list] = None) -> None:
             pass
     ap = build_parser()
     args = ap.parse_args(argv)
+    if args.cmd in ("screen", "bedrock"):
+        # ゲームと CPU を分け合うとき、numba の OpenMP スレッドが空きコアを待ってスピンし続けると
+        # 10 倍以上遅くなる（実測）。スピンせずに眠って待つようにする（numba の並列処理の初回起動前に設定）。
+        os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+        os.environ.setdefault("KMP_BLOCKTIME", "0")
     if args.cmd in ("sim", "bedrock", "screen"):
         _log(BANNER)
     args.func(args)

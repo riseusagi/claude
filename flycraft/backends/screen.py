@@ -1,34 +1,93 @@
-"""画面キャプチャ + 仮想キーボード/マウスで Minecraft 統合版を操作する。
+"""画面キャプチャ + 仮想キーボード/マウスで Minecraft 統合版を操作する（方法 B）。
 
-* 視覚: Minecraft のウィンドウを mss でキャプチャする（pip install mss）
-* 操作: Windows は SendInput（スキャンコード）で W/S/Space/左クリックとマウス移動を送る。
-  それ以外の OS では pynput があればそれを使う。
-* 安全装置: Minecraft のウィンドウが最前面のときだけ入力を送る。F8 で一時停止/再開。
-  一時停止・終了時は押しっぱなしのキーをすべて離す。
-* 触覚: W を押しているのに画面がほとんど変わらない → 何かにぶつかっている、とみなす。
+* 視覚: Minecraft のウィンドウを別スレッドでキャプチャし続け、最新の画像を使う。
+  Windows は GDI の StretchBlt（HALFTONE = 面積平均の縮小）で小さく取り込むので軽い。
+  それ以外は mss（pip install mss）。
+* 操作: Windows は SendInput（スキャンコード + 相対マウス移動）。それ以外は pynput。
+* 安全装置（入力を送るのは次をすべて満たすときだけ）:
+  - Minecraft のウィンドウが最前面
+  - マウスカーソルが隠れている（= ゲームがマウスを掴んでいる。ポーズ・インベントリ・チャット中は
+    カーソルが出るので、メニューのボタンを誤ってクリックしない）
+  - F8 で一時停止していない
+  条件が崩れた瞬間に押しているキーをすべて離す。終了時・異常終了時も離す。
+* 統合版の癖への対策:
+  - W の素早い 2 度押しはダッシュになる → 前進にヒステリシスと再押下までの最小間隔
+  - クリエイティブで Space の 2 度押しは飛行の切り替え → ジャンプに 0.6 秒のクールダウン
+  - 旋回はマウスの移動量で決まり感度に依存する → 起動時に自動較正（マウスを少し動かして
+    画面のずれから「1 px あたり何度回るか」を測る）し、視線の上下も水平付近にそろえる
+* 触覚: W を押しているのに画面に視差（奥行きによる動きの違い）が生じない → 壁に当たっている。
+  回転や視点の揺れは画面全体の一様なずれなので、ずれを補正した残差で判定する。
 
-統合版の設定で「自動ジャンプ」をオンにしておくと 1 段の段差を登れる。
+統合版の設定: 「自動ジャンプ」オン、「表示の揺れ」オフ推奨。F1 で HUD（手・ホットバー）を隠すと見やすい。
 """
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import math
+import os
 import sys
+import threading
 import time
-from typing import Callable, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
 
 from ..interface import Action, Backend, Observation
 
 IS_WIN = sys.platform == "win32"
+IS_X11 = sys.platform.startswith("linux") and bool(os.environ.get("DISPLAY"))
+
+Rect = Tuple[int, int, int, int]
 
 
-# ------------------------------------------------------------------ windows
+# ================================================================== Windows
+_PROTO_DONE = False
+
+
+def _win_prototypes() -> None:
+    """64 ビット Windows でハンドルが切り詰められないよう、使う API の型を宣言する。"""
+    global _PROTO_DONE
+    if _PROTO_DONE or not IS_WIN:
+        return
+    from ctypes import wintypes as W
+
+    u, g, k = ctypes.windll.user32, ctypes.windll.gdi32, ctypes.windll.kernel32
+    u.GetForegroundWindow.restype = W.HWND
+    u.GetAncestor.argtypes, u.GetAncestor.restype = (W.HWND, W.UINT), W.HWND
+    u.IsWindow.argtypes = (W.HWND,)
+    u.IsWindowVisible.argtypes = (W.HWND,)
+    u.IsIconic.argtypes = (W.HWND,)
+    u.GetWindowTextLengthW.argtypes = (W.HWND,)
+    u.GetWindowTextW.argtypes = (W.HWND, W.LPWSTR, ctypes.c_int)
+    u.GetWindowThreadProcessId.argtypes = (W.HWND, ctypes.POINTER(W.DWORD))
+    u.GetClientRect.argtypes = (W.HWND, ctypes.POINTER(W.RECT))
+    u.ClientToScreen.argtypes = (W.HWND, ctypes.POINTER(W.POINT))
+    u.GetDC.argtypes, u.GetDC.restype = (W.HWND,), W.HDC
+    u.ReleaseDC.argtypes = (W.HWND, W.HDC)
+    k.OpenProcess.argtypes, k.OpenProcess.restype = (W.DWORD, W.BOOL, W.DWORD), W.HANDLE
+    k.CloseHandle.argtypes = (W.HANDLE,)
+    k.QueryFullProcessImageNameW.argtypes = (W.HANDLE, W.DWORD, W.LPWSTR, ctypes.POINTER(W.DWORD))
+    g.CreateCompatibleDC.argtypes, g.CreateCompatibleDC.restype = (W.HDC,), W.HDC
+    g.CreateDIBSection.argtypes = (W.HDC, ctypes.c_void_p, W.UINT, ctypes.POINTER(ctypes.c_void_p),
+                                   W.HANDLE, W.DWORD)
+    g.CreateDIBSection.restype = W.HBITMAP
+    g.SelectObject.argtypes, g.SelectObject.restype = (W.HDC, W.HGDIOBJ), W.HGDIOBJ
+    g.SetStretchBltMode.argtypes = (W.HDC, ctypes.c_int)
+    g.SetBrushOrgEx.argtypes = (W.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+    g.StretchBlt.argtypes = (W.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             W.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, W.DWORD)
+    g.DeleteObject.argtypes = (W.HGDIOBJ,)
+    g.DeleteDC.argtypes = (W.HDC,)
+    _PROTO_DONE = True
+
+
 def _win_dpi_aware() -> None:
     if not IS_WIN:
         return
+    _win_prototypes()
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
@@ -38,38 +97,78 @@ def _win_dpi_aware() -> None:
             pass
 
 
+def _win_process_name(hwnd) -> str:
+    from ctypes import wintypes
+
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        size = wintypes.DWORD(512)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value).lower()
+        return ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+BROWSERS = ("chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "explorer.exe",
+            "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "python.exe", "pythonw.exe",
+            "code.exe", "discord.exe")
+
+
+def window_score(title: str, proc: str, want: str) -> int:
+    """ウィンドウが目的の Minecraft らしいかの点数（0 は対象外）。"""
+    t, w = title.lower(), want.lower()
+    if w not in t or "flycraft" in t:
+        return 0
+    if proc in BROWSERS:
+        return 0  # 「Minecraft Wiki - Chrome」などを誤って選ばない
+    score = 1
+    if t == w:
+        score += 3
+    if "minecraft" in proc:
+        score += 4
+    return score
+
+
 def find_window(title_part: str):
-    """タイトルに title_part を含む表示中のウィンドウ (hwnd) を探す（Windows）。"""
+    """Minecraft のウィンドウ (hwnd) を探す（Windows）。見つからなければ None。"""
     if not IS_WIN:
         return None
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
     found = []
-    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    proc_t = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def cb(hwnd, _):
-        if user32.IsWindowVisible(hwnd):
+        if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
             n = user32.GetWindowTextLengthW(hwnd)
             if n:
                 buf = ctypes.create_unicode_buffer(n + 1)
                 user32.GetWindowTextW(hwnd, buf, n + 1)
-                if title_part.lower() in buf.value.lower() and "flycraft" not in buf.value.lower():
-                    found.append((hwnd, buf.value))
+                s = window_score(buf.value, _win_process_name(hwnd), title_part)
+                if s >= 2:
+                    found.append((s, hwnd, buf.value))
         return True
 
-    user32.EnumWindows(proc(cb), 0)
-    # 完全一致を優先
-    found.sort(key=lambda t: (t[1].lower() != title_part.lower(), len(t[1])))
-    return found[0][0] if found else None
+    user32.EnumWindows(proc_t(cb), 0)
+    found.sort(key=lambda t: -t[0])
+    return found[0][1] if found else None
 
 
-def client_rect(hwnd) -> Optional[Tuple[int, int, int, int]]:
+def client_rect(hwnd) -> Optional[Rect]:
     if not IS_WIN or not hwnd:
         return None
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
+    if not user32.IsWindow(hwnd):
+        return None
     r = wintypes.RECT()
     if not user32.GetClientRect(hwnd, ctypes.byref(r)):
         return None
@@ -78,86 +177,312 @@ def client_rect(hwnd) -> Optional[Tuple[int, int, int, int]]:
     return pt.x, pt.y, r.right - r.left, r.bottom - r.top
 
 
-def is_foreground(hwnd) -> bool:
-    if not IS_WIN or not hwnd:
+def win_is_foreground(hwnd) -> bool:
+    user32 = ctypes.windll.user32
+    fg = user32.GetForegroundWindow()
+    if fg == hwnd:
         return True
-    return ctypes.windll.user32.GetForegroundWindow() == hwnd
+    GA_ROOTOWNER = 3
+    return bool(fg) and user32.GetAncestor(fg, GA_ROOTOWNER) == user32.GetAncestor(hwnd, GA_ROOTOWNER)
 
 
-# ------------------------------------------------------------------ capture
+def win_cursor_hidden() -> bool:
+    CURSORINFO = win_input_structs()[3]
+    ci = CURSORINFO()
+    ci.cbSize = ctypes.sizeof(CURSORINFO)
+    if not ctypes.windll.user32.GetCursorInfo(ctypes.byref(ci)):
+        return False
+    return not (ci.flags & 0x1) or not ci.hCursor
+
+
+class _GdiGrabber:
+    """GDI の StretchBlt(HALFTONE) で画面の一部を縮小しながら取り込む（Windows）。"""
+
+    def __init__(self) -> None:
+        from ctypes import wintypes
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                        ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD),
+                        ("biCompression", wintypes.DWORD), ("biSizeImage", wintypes.DWORD),
+                        ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG),
+                        ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+        self.BIH = BITMAPINFOHEADER
+        self.user32 = ctypes.windll.user32
+        self.gdi = ctypes.windll.gdi32
+        _win_prototypes()
+        self._size = None
+        self._mem = None
+        self._bmp = None
+        self._bits = None
+
+    def _ensure(self, w: int, h: int) -> None:
+        if self._size == (w, h):
+            return
+        self.close()
+        bih = self.BIH()
+        bih.biSize = ctypes.sizeof(self.BIH)
+        bih.biWidth, bih.biHeight = w, -h  # 上から下
+        bih.biPlanes, bih.biBitCount, bih.biCompression = 1, 32, 0
+        bits = ctypes.c_void_p()
+        screen = self.user32.GetDC(0)
+        self._mem = self.gdi.CreateCompatibleDC(screen)
+        self._bmp = self.gdi.CreateDIBSection(screen, ctypes.byref(bih), 0, ctypes.byref(bits), None, 0)
+        self.user32.ReleaseDC(0, screen)
+        self.gdi.SelectObject(self._mem, self._bmp)
+        self.gdi.SetStretchBltMode(self._mem, 4)  # HALFTONE（面積平均）
+        self.gdi.SetBrushOrgEx(self._mem, 0, 0, None)
+        self._bits = bits
+        self._size = (w, h)
+
+    def grab(self, rect: Rect, out_w: int, out_h: int) -> np.ndarray:
+        self._ensure(out_w, out_h)
+        x, y, w, h = rect
+        screen = self.user32.GetDC(0)
+        try:
+            self.gdi.StretchBlt(self._mem, 0, 0, out_w, out_h, screen, x, y, w, h, 0x00CC0020)  # SRCCOPY
+        finally:
+            self.user32.ReleaseDC(0, screen)
+        self.gdi.GdiFlush()  # 描画の完了を待ってからビットを読む
+        buf = (ctypes.c_ubyte * (out_w * out_h * 4)).from_address(self._bits.value)
+        img = np.frombuffer(buf, dtype=np.uint8).reshape(out_h, out_w, 4)
+        return img[:, :, 2::-1].copy()  # BGRA → RGB
+
+    def close(self) -> None:
+        if self._bmp:
+            self.gdi.DeleteObject(self._bmp)
+        if self._mem:
+            self.gdi.DeleteDC(self._mem)
+        self._bmp = self._mem = None
+        self._size = None
+
+
+# ===================================================================== X11
+class _X11Probe:
+    """X11 でカーソルが隠れているか（XFixes）を調べる。python-xlib が無ければ無効。"""
+
+    def __init__(self) -> None:
+        self.ok = False
+        try:
+            from Xlib import display
+
+            self.d = display.Display()
+            self.d.xfixes_query_version()
+            self.root = self.d.screen().root
+            self.ok = True
+        except Exception:
+            self.ok = False
+
+    def cursor_hidden(self) -> Optional[bool]:
+        if not self.ok:
+            return None
+        try:
+            img = self.d.xfixes_get_cursor_image(self.root)
+            return max(((p >> 24) & 255 for p in img.cursor_image), default=0) == 0
+        except Exception:
+            return None
+
+
+# ================================================================= capture
+def area_downsample(img: np.ndarray, out_w: int) -> np.ndarray:
+    """整数倍の面積平均で縮小（間引きによるちらつき＝偽の動きを避ける）。"""
+    h, w = img.shape[:2]
+    k = max(1, w // out_w)
+    if k == 1:
+        return img
+    h2, w2 = (h // k) * k, (w // k) * k
+    x = img[:h2, :w2].reshape(h2 // k, k, w2 // k, k, img.shape[2]).mean(axis=(1, 3))
+    return x.astype(np.uint8)
+
+
 class ScreenCapture:
-    def __init__(self, window: Optional[str] = "Minecraft", region: Optional[str] = None,
-                 max_width: int = 256) -> None:
-        _win_dpi_aware()
-        import importlib.util
+    """Minecraft のウィンドウ（または指定範囲）を別スレッドで取り込み続ける。"""
 
-        if importlib.util.find_spec("mss") is None:  # pragma: no cover - 環境依存
-            raise RuntimeError("画面キャプチャには mss が必要です: pip install mss")
+    def __init__(self, window: Optional[str] = "Minecraft", region: Optional[str] = None,
+                 out_width: int = 256, fps: float = 30.0) -> None:
+        _win_dpi_aware()
         self.window = window
         self.region = tuple(int(v) for v in region.split(",")) if region else None
-        self.max_width = max_width
+        self.out_width = out_width
+        self.fps = fps
         self.hwnd = None
-        self._sct = None
+        self._rect: Optional[Rect] = None
+        self._rect_t = 0.0
+        self._latest: Optional[np.ndarray] = None
+        self._latest_t = 0.0
+        self._cond = threading.Condition()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = False
+        self.error: Optional[str] = None
+        self.method = "gdi" if IS_WIN else "mss"
+        if not IS_WIN:
+            import importlib.util
 
-    def locate(self) -> Tuple[int, int, int, int]:
+            if importlib.util.find_spec("mss") is None:  # pragma: no cover - 環境依存
+                raise RuntimeError("画面キャプチャには mss が必要です: pip install mss")
+
+    # ---------------------------------------------------------- location
+    def locate(self) -> Rect:
         if self.region:
             return self.region  # type: ignore[return-value]
+        now = time.time()
+        if self._rect is not None and now - self._rect_t < 1.0:
+            return self._rect
+        rect = None
         if self.window and IS_WIN:
-            if not self.hwnd:
+            if not self.hwnd or not ctypes.windll.user32.IsWindow(self.hwnd):
                 self.hwnd = find_window(self.window)
             rect = client_rect(self.hwnd) if self.hwnd else None
-            if rect and rect[2] > 50 and rect[3] > 50:
-                return rect
-        import mss
+            if rect and (rect[2] < 50 or rect[3] < 50):
+                rect = None
+        if rect is None:
+            rect = self._monitor()
+        self._rect, self._rect_t = rect, now
+        return rect
 
-        with mss.mss() as s:
+    def _monitor(self) -> Rect:
+        if IS_WIN:
+            u = ctypes.windll.user32
+            return 0, 0, u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+        with _mss() as s:
             m = s.monitors[1]
             return m["left"], m["top"], m["width"], m["height"]
 
-    def grab(self) -> np.ndarray:
-        import mss
-
-        if self._sct is None:
-            self._sct = mss.mss()
+    # ----------------------------------------------------------- grabbing
+    def _grab_once(self, grabber) -> np.ndarray:
         x, y, w, h = self.locate()
-        shot = self._sct.grab({"left": x, "top": y, "width": w, "height": h})
-        img = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)
-        step = max(1, int(math.ceil(shot.width / self.max_width)))
-        return np.ascontiguousarray(img[::step, ::step, 2::-1])  # BGRA → RGB
+        ow = min(self.out_width, w)
+        oh = max(1, int(round(h * ow / w)))
+        if IS_WIN:
+            return grabber.grab((x, y, w, h), ow, oh)
+        shot = grabber.grab({"left": x, "top": y, "width": w, "height": h})
+        img = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4)[:, :, 2::-1]
+        return np.ascontiguousarray(area_downsample(img, ow))
 
-    @property
+    def grab(self) -> np.ndarray:
+        """同期的に 1 枚取り込む（スレッド未使用時・較正用）。"""
+        if self._thread is not None:
+            return self.wait_frame(after=time.time())
+        g = _GdiGrabber() if IS_WIN else _mss()
+        try:
+            return self._grab_once(g)
+        finally:
+            g.close()
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._loop, name="flycraft-capture", daemon=True)
+            self._thread.start()
+
+    def _loop(self) -> None:
+        g = _GdiGrabber() if IS_WIN else _mss()
+        period = 1.0 / self.fps
+        try:
+            while not self._stop:
+                t0 = time.time()
+                try:
+                    img = self._grab_once(g)
+                    self.error = None
+                except Exception as e:  # pragma: no cover - 画面の変化など
+                    self.error = f"{type(e).__name__}: {e}"
+                    time.sleep(0.2)
+                    continue
+                with self._cond:
+                    self._latest, self._latest_t = img, t0
+                    self._cond.notify_all()
+                dt = time.time() - t0
+                if dt < period:
+                    time.sleep(period - dt)
+        finally:
+            g.close()
+
+    def latest(self) -> Tuple[Optional[np.ndarray], float]:
+        with self._cond:
+            return self._latest, self._latest_t
+
+    def wait_frame(self, after: float, timeout: float = 2.0) -> np.ndarray:
+        """時刻 after 以降に撮られた画像を待つ。"""
+        end = time.time() + timeout
+        with self._cond:
+            while self._latest is None or self._latest_t < after:
+                rest = end - time.time()
+                if rest <= 0:
+                    break
+                self._cond.wait(rest)
+            if self._latest is None:
+                raise RuntimeError(self.error or "画面を取り込めません")
+            return self._latest
+
+    def close(self) -> None:
+        self._stop = True
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    # -------------------------------------------------------------- state
     def foreground(self) -> bool:
-        return is_foreground(self.hwnd) if self.hwnd else True
+        if IS_WIN:
+            if self.hwnd:
+                return win_is_foreground(self.hwnd)
+            # ウィンドウが見つからないのに入力すると、ターミナルやブラウザにキーを送ってしまう。
+            # 範囲を明示指定したときだけ（カーソル判定を頼りに）許可する。
+            return self.region is not None
+        return True
 
 
-# -------------------------------------------------------------------- input
+def _mss():
+    import mss
+
+    return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+
+
+# =================================================================== input
+def win_input_structs():
+    """SendInput / GetCursorInfo 用の構造体。
+
+    Windows のサイズ（DWORD = 32 ビット）に合わせて固定幅の型で定義する
+    （他の OS でもサイズの検証ができる）。64 ビットでは INPUT が 40 バイト。
+    """
+    U32, I32, U16 = ctypes.c_uint32, ctypes.c_int32, ctypes.c_uint16
+    ULONG_PTR = ctypes.c_size_t
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", U16), ("wScan", U16), ("dwFlags", U32), ("time", U32), ("dwExtraInfo", ULONG_PTR)]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", I32), ("dy", I32), ("mouseData", U32), ("dwFlags", U32), ("time", U32),
+                    ("dwExtraInfo", ULONG_PTR)]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [("uMsg", U32), ("wParamL", U16), ("wParamH", U16)]
+
+    class _U(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", U32), ("u", _U)]
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", I32), ("y", I32)]
+
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", U32), ("flags", U32), ("hCursor", ctypes.c_void_p), ("ptScreenPos", POINT)]
+
+    return INPUT, KEYBDINPUT, MOUSEINPUT, CURSORINFO
+
+
 class _WinInput:
     SCAN = {"w": 0x11, "a": 0x1E, "s": 0x1F, "d": 0x20, "space": 0x39, "shift": 0x2A}
 
     def __init__(self) -> None:
         from ctypes import wintypes
 
-        ULONG_PTR = ctypes.c_size_t
-
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
-                        ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
-
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
-                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
-
-        class HARDWAREINPUT(ctypes.Structure):
-            _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD), ("wParamH", wintypes.WORD)]
-
-        class _U(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", wintypes.DWORD), ("u", _U)]
-
+        INPUT, KEYBDINPUT, MOUSEINPUT, _ = win_input_structs()
         self.INPUT, self.KEYBDINPUT, self.MOUSEINPUT = INPUT, KEYBDINPUT, MOUSEINPUT
         self.user32 = ctypes.windll.user32
+        self.user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+        self.user32.GetAsyncKeyState.restype = ctypes.c_short
+        self._prev: Dict[int, bool] = {}
 
     def _send(self, inp) -> None:
         self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
@@ -170,7 +495,7 @@ class _WinInput:
 
     def move(self, dx: int, dy: int) -> None:
         inp = self.INPUT(type=0)
-        inp.u.mi = self.MOUSEINPUT(int(dx), int(dy), 0, 0x0001, 0, 0)
+        inp.u.mi = self.MOUSEINPUT(int(dx), int(dy), 0, 0x0001, 0, 0)  # MOUSEEVENTF_MOVE（相対）
         self._send(inp)
 
     def button(self, down: bool) -> None:
@@ -178,8 +503,12 @@ class _WinInput:
         inp.u.mi = self.MOUSEINPUT(0, 0, 0, 0x0002 if down else 0x0004, 0, 0)
         self._send(inp)
 
-    def pressed(self, vk: int) -> bool:
-        return bool(self.user32.GetAsyncKeyState(vk) & 0x0001)
+    def hotkey_pressed(self, vk: int) -> bool:
+        """押された瞬間だけ True（上位ビットの立ち上がりを自前で検出）。"""
+        now = bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
+        was = self._prev.get(vk, False)
+        self._prev[vk] = now
+        return now and not was
 
 
 class _PynputInput:  # pragma: no cover - 環境依存
@@ -191,6 +520,17 @@ class _PynputInput:  # pragma: no cover - 環境依存
         self.K = {"w": "w", "a": "a", "s": "s", "d": "d", "space": keyboard.Key.space,
                   "shift": keyboard.Key.shift}
         self.Button = mouse.Button
+        self._hot = set()
+        try:
+            def on_press(k):
+                if k == keyboard.Key.f8:
+                    self._hot.add(0x77)
+
+            self._listener = keyboard.Listener(on_press=on_press)
+            self._listener.daemon = True
+            self._listener.start()
+        except Exception:
+            self._listener = None
 
     def key(self, name, down):
         (self.kb.press if down else self.kb.release)(self.K[name])
@@ -201,7 +541,10 @@ class _PynputInput:  # pragma: no cover - 環境依存
     def button(self, down):
         (self.ms.press if down else self.ms.release)(self.Button.left)
 
-    def pressed(self, vk):
+    def hotkey_pressed(self, vk):
+        if vk in self._hot:
+            self._hot.discard(vk)
+            return True
         return False
 
 
@@ -220,7 +563,7 @@ class _NullInput:
     def button(self, down):
         self.log.append(("button", down))
 
-    def pressed(self, vk):
+    def hotkey_pressed(self, vk):
         return False
 
 
@@ -233,114 +576,432 @@ def make_input():
         raise RuntimeError("キー入力の送信には Windows か pynput が必要です: pip install pynput") from e
 
 
-# ------------------------------------------------------------------ backend
-class InputState:
-    """押しているキーを管理し、変化があったときだけ送る。"""
+# ============================================================== controller
+@dataclass
+class KeyPolicy:
+    fwd_on: float = 0.3  # これを超えたら W を押す
+    fwd_off: float = 0.12  # これを下回ったら離す（ヒステリシス）
+    min_hold: float = 0.25  # 押したら最低この時間は押し続ける [s]
+    min_gap: float = 0.45  # 離してから再び押すまでの最小間隔（2 度押しダッシュ防止）[s]
+    jump_hold: float = 0.12  # Space を押している時間 [s]
+    jump_cooldown: float = 0.6  # ジャンプの間隔（2 度押しで飛行モードにならないように）[s]
+    attack_release: float = 0.3  # 噛む指令が消えてから左クリックを離すまで [s]
+    turn_deg_s: float = 150.0  # 旋回指令 1.0 のときの回転速度 [度/秒]
+    max_turn_step: float = 30.0  # 1 回で回す角度の上限 [度]
 
-    def __init__(self, dev) -> None:
+
+class _Key:
+    def __init__(self, send, name: str) -> None:
+        self.send, self.name = send, name
+        self.down = False
+        self.t_change = -1e9
+
+    def set(self, on: bool, now: float) -> None:
+        if on != self.down:
+            self.down = on
+            self.t_change = now
+            self.send(self.name, on)
+
+
+class Controller:
+    """脳の指令 → キー・マウス操作（統合版の癖を避けるための時間的な制約つき）。"""
+
+    def __init__(self, dev, policy: Optional[KeyPolicy] = None, deg_per_px: float = 0.15) -> None:
         self.dev = dev
-        self.down = {"w": False, "s": False, "space": False, "mouse": False}
+        self.p = policy or KeyPolicy()
+        self.deg_per_px = deg_per_px
+        send = lambda name, on: self.dev.button(on) if name == "mouse" else self.dev.key(name, on)  # noqa: E731
+        self.keys = {k: _Key(send, k) for k in ("w", "s", "space", "mouse")}
+        self._last_jump = -1e9
+        self._last_attack = -1e9
         self._mx = 0.0
+        self.turned_deg = 0.0
 
-    def set(self, name: str, on: bool) -> None:
-        if self.down[name] == on:
-            return
-        self.down[name] = on
-        if name == "mouse":
-            self.dev.button(on)
-        else:
-            self.dev.key(name, on)
+    def _hold(self, key: str, want: bool, now: float) -> None:
+        k, p = self.keys[key], self.p
+        if want and not k.down:
+            if now - k.t_change >= p.min_gap:
+                k.set(True, now)
+        elif not want and k.down:
+            if now - k.t_change >= p.min_hold:
+                k.set(False, now)
 
-    def turn(self, px: float) -> None:
-        self._mx += px
+    def apply(self, action: Action, now: float, wall_dt: float) -> None:
+        p = self.p
+        w, s = self.keys["w"], self.keys["s"]
+        f = float(action.forward)
+        want_w = f > p.fwd_on or (w.down and f > p.fwd_off)
+        want_s = f < -p.fwd_on or (s.down and f < -p.fwd_off)
+        if want_w and s.down:
+            want_s = False
+        if want_s and w.down:
+            want_w = False
+        self._hold("w", want_w, now)
+        self._hold("s", want_s, now)
+        # ジャンプ: 短く押して離す。クールダウン中は押さない
+        sp = self.keys["space"]
+        if sp.down and now - sp.t_change >= p.jump_hold:
+            sp.set(False, now)
+        elif not sp.down and action.jump and now - self._last_jump >= p.jump_cooldown:
+            sp.set(True, now)
+            self._last_jump = now
+        # 噛む: 指令が消えてもしばらく押し続ける（採掘が途切れないように）
+        if action.attack:
+            self._last_attack = now
+        want_m = now - self._last_attack < p.attack_release
+        m = self.keys["mouse"]
+        if want_m != m.down and (want_m or now - m.t_change >= p.min_hold):
+            m.set(want_m, now)
+        # 旋回: 実時間に比例した角度 → マウスの移動量（+ = 左 → マウスは左 = dx < 0）
+        deg = float(np.clip(action.turn * p.turn_deg_s * wall_dt, -p.max_turn_step, p.max_turn_step))
+        self._mx += -deg / max(self.deg_per_px, 1e-4)
         step = int(self._mx)
         if step:
             self._mx -= step
             self.dev.move(step, 0)
+            self.turned_deg += -step * self.deg_per_px
 
-    def release_all(self) -> None:
-        for k in list(self.down):
-            self.set(k, False)
+    def release_all(self, now: float) -> None:
+        for k in self.keys.values():
+            k.set(False, now)
+        self._mx = 0.0
+
+    def pressed(self) -> Dict[str, bool]:
+        return {k: v.down for k, v in self.keys.items()}
 
 
+# =========================================================== image motion
+def _gray_small(frame: np.ndarray, w: int = 96) -> np.ndarray:
+    g = frame.astype(np.float32).mean(axis=2)
+    k = max(1, g.shape[1] // w)
+    h2, w2 = (g.shape[0] // k) * k, (g.shape[1] // k) * k
+    return g[:h2, :w2].reshape(h2 // k, k, w2 // k, k).mean(axis=(1, 3))
+
+
+def phase_shift(a: np.ndarray, b: np.ndarray) -> Tuple[float, float, float]:
+    """b が a に対して (dx, dy) だけずれている量（位相限定相関）と、ピークの鋭さ。"""
+    wy = np.hanning(a.shape[0])[:, None]
+    wx = np.hanning(a.shape[1])[None, :]
+    fa = np.fft.fft2((a - a.mean()) * wy * wx)
+    fb = np.fft.fft2((b - b.mean()) * wy * wx)
+    r = fb * np.conj(fa)
+    r /= np.abs(r) + 1e-9
+    c = np.real(np.fft.ifft2(r))
+    iy, ix = np.unravel_index(int(np.argmax(c)), c.shape)
+    peak = float(c[iy, ix])
+    dy = iy if iy <= a.shape[0] // 2 else iy - a.shape[0]
+    dx = ix if ix <= a.shape[1] // 2 else ix - a.shape[1]
+    # 放物線近似でサブピクセル
+    def sub(cm, c0, cp):
+        d = cm - 2 * c0 + cp
+        return 0.0 if abs(d) < 1e-12 else 0.5 * (cm - cp) / d
+
+    fx = sub(c[iy, (ix - 1) % c.shape[1]], c[iy, ix], c[iy, (ix + 1) % c.shape[1]])
+    fy = sub(c[(iy - 1) % c.shape[0], ix], c[iy, ix], c[(iy + 1) % c.shape[0], ix])
+    return dx + fx, dy + fy, peak
+
+
+def parallax_residual(a: np.ndarray, b: np.ndarray, fov_h: float = 100.0, r: int = 1) -> float:
+    """回転（と視点の揺れ）を補正したあとに残る画面の変化の大きさ。
+
+    前に進んでいれば近い物ほど大きく動く（視差）ので残差が大きく、壁に押し付けられて
+    止まっていれば小さい。画面中央のずれから回転角を推定し、透視投影に沿って前の画像を
+    回転させてから比べる。値はコントラストで正規化する。
+    """
+    H, W = a.shape
+    f = (W / 2) / math.tan(math.radians(fov_h) / 2)
+    ch, cw = H // 4, W // 4
+    dx, dy, _ = phase_shift(a[ch:H - ch, cw:W - cw], b[ch:H - ch, cw:W - cw])
+    delta = math.atan(dx / f)
+    xs = np.arange(W) - (W - 1) / 2
+    ys = np.arange(H) - (H - 1) / 2
+    phi_b = np.arctan(xs / f)
+    phi_a = phi_b - delta
+    ok_x = np.abs(phi_a) < math.radians(fov_h) / 2
+    xi = np.rint((W - 1) / 2 + f * np.tan(np.clip(phi_a, -1.5, 1.5))).astype(int)
+    scale = np.cos(phi_b) / np.cos(phi_a)
+    best = np.inf
+    for sy in range(int(round(dy)) - r, int(round(dy)) + r + 1):
+        yi = np.rint((H - 1) / 2 + (ys[:, None] - sy) * scale[None, :]).astype(int)
+        xx = np.broadcast_to(xi, (H, W))
+        m = ok_x[None, :] & (xx >= 0) & (xx < W) & (yi >= 0) & (yi < H)
+        if m.mean() < 0.3:
+            continue
+        best = min(best, float(np.abs(b[m] - a[yi[m], xx[m]]).mean()))
+    if not np.isfinite(best):
+        return 1.0
+    contrast = float(np.abs(a - a.mean()).mean()) + 1.0
+    return best / contrast
+
+
+class BumpDetector:
+    """W を押しているのに足元の地面が流れない状態が続いたら「何かに当たっている」とみなす。
+
+    歩いていれば足元の地面は近いので大きく・不均一に流れる（視差）。壁に押し付けられて
+    いれば、視点の揺れや旋回で画面がずれても、回転を補正した残差は小さい。
+    画面下部の左寄り（ホットバーと右下の手を避ける）で判定し、旋回が大きいほど閾値を上げる。
+    FakeCraft（統合版の操作系を真似たテスト用ゲーム）での実測: 押し付け 0.03〜0.05、
+    その場で旋回しながら穴の中 0.2〜0.4、歩行 0.6〜1.2。
+    """
+
+    REGION = (0.55, 0.88, 0.08, 0.62)  # 行・列の範囲（割合）
+
+    def __init__(self, interval: float = 0.12, threshold: float = 0.22, per_deg: float = 0.03,
+                 hold: float = 0.35, max_turn_deg: float = 10.0) -> None:
+        self.interval = interval
+        self.threshold = threshold
+        self.per_deg = per_deg
+        self.hold = hold
+        self.max_turn_deg = max_turn_deg
+        self._ref = None
+        self._ref_t = 0.0
+        self._ref_turn = 0.0
+        self._stuck_t = 0.0
+        self.residual = 0.0
+        self.touch = 0.0
+
+    def update(self, frame: np.ndarray, t: float, walking: bool, dt: float, turned_deg: float = 0.0,
+               fov_h: float = 100.0) -> float:
+        g = _gray_small(frame)
+        H, W = g.shape
+        y0, y1, x0, x1 = self.REGION
+        g = g[int(H * y0):int(H * y1), int(W * x0):int(W * x1)]
+        if self._ref is None or self._ref.shape != g.shape:
+            self._ref, self._ref_t, self._ref_turn = g, t, turned_deg
+        elif t - self._ref_t >= self.interval:
+            span = t - self._ref_t
+            turned = abs(turned_deg - self._ref_turn) * (self.interval / span)
+            if turned <= self.max_turn_deg:
+                self.residual = parallax_residual(self._ref, g, fov_h * (x1 - x0))
+                if walking and self.residual < self.threshold + self.per_deg * turned:
+                    self._stuck_t += span
+                else:
+                    self._stuck_t = 0.0
+            self._ref, self._ref_t, self._ref_turn = g, t, turned_deg
+        if not walking:
+            self._stuck_t = 0.0
+        self.touch = 0.8 if self._stuck_t >= self.hold else self.touch * math.exp(-dt / 0.3)
+        return self.touch
+
+
+# ================================================================ backend
 class ScreenBackend(Backend):
     name = "screen"
     VK_F8 = 0x77
 
     def __init__(self, window: Optional[str] = "Minecraft", region: Optional[str] = None,
-                 fov_v: float = 70.0, mouse_speed: float = 6.0, countdown: float = 3.0,
-                 capture=None, input_device=None, log: Callable[[str], None] = print) -> None:
+                 fov_v: float = 70.0, deg_per_px: Optional[float] = None, calibrate: bool = True,
+                 pitch: Optional[float] = 8.0, cursor_check: bool = True, countdown: float = 3.0,
+                 policy: Optional[KeyPolicy] = None, capture=None, input_device=None,
+                 log: Callable[[str], None] = print) -> None:
         self.cap = capture or ScreenCapture(window, region)
-        self.inp = InputState(input_device or make_input())
+        self.dev = input_device or make_input()
+        self.ctl = Controller(self.dev, policy, deg_per_px or 0.15)
         self.fov_v = fov_v
-        self.mouse_speed = mouse_speed
+        self.calibrate = calibrate and deg_per_px is None
+        self.target_pitch = pitch
+        self.cursor_check = cursor_check
         self.countdown = countdown
         self.log = log
         self.paused = False
-        self._last = None
-        self._prev_small = None
-        self._still = 0.0
-        self._touch = 0.0
+        self.bump = BumpDetector()
+        self.x11 = _X11Probe() if (IS_X11 and cursor_check) else None
+        self.status = ""
+        self.events = []
         self._t_last = time.perf_counter()
+        self._walk_since = None
+        self._was_active = None
+        atexit.register(self._emergency_release)
 
     @property
     def realtime(self) -> bool:
         return True
 
+    # --------------------------------------------------------------- state
+    def cursor_hidden(self) -> Optional[bool]:
+        if not self.cursor_check:
+            return True
+        if IS_WIN:
+            return win_cursor_hidden()
+        if self.x11 is not None:
+            return self.x11.cursor_hidden()
+        return None  # 判定できない OS
+
+    def game_active(self) -> Tuple[bool, str]:
+        if self.paused:
+            return False, "F8 で一時停止中"
+        if not self.cap.foreground():
+            if IS_WIN and not self.cap.hwnd and not self.cap.region:
+                return False, "Minecraft のウィンドウが見つかりません（起動しているか、--window を確認）"
+            return False, "Minecraft が最前面ではありません（クリックして前面に）"
+        hidden = self.cursor_hidden()
+        if hidden is False:
+            return False, "マウスカーソルが表示されています（メニュー・チャット中？ Esc でゲームに戻す）"
+        return True, "操作中"
+
+    # --------------------------------------------------------------- setup
     def reset(self) -> Observation:
+        self.cap.start()
+        frame = self.cap.wait_frame(after=0.0, timeout=5.0)
         x, y, w, h = self.cap.locate()
-        self.log(f"🎮 キャプチャ範囲: x={x} y={y} {w}×{h}"
-                 + ("（ウィンドウが見つからないので画面全体）" if IS_WIN and not self.cap.hwnd and not self.cap.region else ""))
-        self.log("   ・Minecraft のウィンドウを最前面にすると操作が始まります（最前面でない間は入力しません）")
+        how = "ウィンドウ" if self.cap.hwnd else ("指定範囲" if self.cap.region else "画面全体")
+        self.log(f"🎮 キャプチャ: {how} x={x} y={y} {w}×{h} → {frame.shape[1]}×{frame.shape[0]}（{self.cap.method}）")
+        if IS_WIN and not self.cap.hwnd and not self.cap.region:
+            self.log("   ⚠ Minecraft のウィンドウが見つかりません。起動しているか、--window でタイトルを指定してください")
+        self.log("   ・Minecraft を最前面にしてゲーム画面（メニューが閉じた状態）にすると操作が始まります")
         self.log("   ・F8 で一時停止/再開、ターミナルで Ctrl+C で終了")
-        self.log("   ・統合版の設定で『自動ジャンプ』をオンにすると段差を登れます")
+        if self.cursor_check and IS_WIN is False and self.cursor_hidden() is None:
+            self.log("   ⚠ この環境ではメニュー表示中かどうかを判定できません（python-xlib を入れると判定できます）")
         for k in range(int(self.countdown), 0, -1):
             self.log(f"   {k}…")
             time.sleep(1.0)
+        if self.calibrate:
+            self._calibrate()
         return self._observe(0.05)
 
+    def _wait_active(self, timeout: float = 30.0) -> bool:
+        end = time.time() + timeout
+        shown = False
+        while time.time() < end:
+            ok, why = self.game_active()
+            if ok:
+                return True
+            if not shown:
+                self.log(f"   …較正の待機中: {why}")
+                shown = True
+            time.sleep(0.2)
+        return False
+
+    def _measure_dpp(self) -> Optional[float]:
+        """マウスを左右に動かし、画面中央部のずれから 1 px あたりの回転角を測る。"""
+        frame = self.cap.wait_frame(after=time.time())
+        H, W = frame.shape[:2]
+        fov_h = math.degrees(2 * math.atan(math.tan(math.radians(self.fov_v) / 2) * W / H))
+        focal = (W / 2) / math.tan(math.radians(fov_h) / 2)
+
+        def center(img):
+            g = _gray_small(img, w=192)
+            h, w = g.shape
+            return g[int(h * 0.2):int(h * 0.8), int(w * 0.25):int(w * 0.75)], W / g.shape[1]
+
+        results = []
+        n = int(np.clip(round(8.0 / max(self.ctl.deg_per_px, 1e-3)), 10, 400))  # 約 8° 回す
+        for sign in (1, -1, 1, -1):
+            a, k = center(self.cap.wait_frame(after=time.time() + 0.05))
+            # 実際のプレイと同じく小刻みに動かす（マウス加速が効く環境でも同じ条件で測る）
+            chunk = max(1, int(round(8.0 / max(self.ctl.deg_per_px, 1e-3) / 6)))
+            left = n
+            while left > 0:
+                step = min(chunk, left)
+                self.dev.move(sign * step, 0)
+                left -= step
+                time.sleep(0.02)
+            b, _ = center(self.cap.wait_frame(after=time.time() + 0.25))
+            dx, dy, peak = phase_shift(a, b)
+            if peak < 0.05:
+                continue
+            ang = math.degrees(math.atan(abs(dx) * k / focal))
+            if (dx < 0) == (sign > 0) and ang > 0.3:  # 右を向けば画面は左へずれる
+                results.append(ang / n)
+        if len(results) >= 2:
+            dpp = float(np.median(results))
+            if 0.003 < dpp < 5.0:
+                return dpp
+        return None
+
+    def _level_pitch(self) -> None:
+        """真下を向いてから決まった角度だけ上げる（ピッチは ±90° で止まる）。"""
+        dpp = self.ctl.deg_per_px
+        down = int(120 / dpp)
+        for _ in range(4):
+            self.dev.move(0, down // 4)
+            time.sleep(0.03)
+        time.sleep(0.15)
+        up = int(round((90 - self.target_pitch) / dpp))
+        for k in range(4):
+            self.dev.move(0, -(up // 4 + (up % 4 if k == 3 else 0)))
+            time.sleep(0.03)
+        time.sleep(0.15)
+
+    def _calibrate(self) -> None:
+        """マウス 1 px あたりの回転角を測り、視線を水平付近にそろえる（2 回繰り返して精度を上げる）。"""
+        if not self._wait_active():
+            self.log("   ⚠ 較正をスキップ（ゲーム画面になりませんでした）。--deg-per-px で指定もできます")
+            return
+        ok = False
+        for rnd in range(2):
+            dpp = self._measure_dpp()
+            if dpp is not None:
+                self.ctl.deg_per_px = dpp
+                ok = True
+            if self.target_pitch is not None and self._wait_active(5.0):
+                self._level_pitch()
+        if ok:
+            self.log(f"🖱  マウス較正: 1 px ≈ {self.ctl.deg_per_px:.3f}°（旋回 1.0 = {self.ctl.p.turn_deg_s:.0f}°/秒）")
+        else:
+            self.log(f"   ⚠ マウス較正に失敗しました。1 px = {self.ctl.deg_per_px:.3f}° として続けます（--deg-per-px で指定可）")
+        if self.target_pitch is not None:
+            self.log(f"   視線を水平から {self.target_pitch:.0f}° 下にそろえました")
+
+    # ---------------------------------------------------------------- loop
     def _observe(self, dt: float) -> Observation:
-        frame = self.cap.grab()
-        small = frame[::4, ::4].astype(np.float32).mean(axis=2)
-        if self._prev_small is not None and self._prev_small.shape == small.shape:
-            diff = float(np.abs(small - self._prev_small).mean())
-            walking = self.inp.down["w"]
-            if walking and diff < 1.2:
-                self._still += dt
-            else:
-                self._still = 0.0
-        self._prev_small = small
-        self._touch = 0.8 if self._still > 0.35 else self._touch * math.exp(-dt / 0.3)
-        return Observation(frame=frame, fov_v=self.fov_v, touch_left=self._touch, touch_right=self._touch,
-                           info={"paused": self.paused, "foreground": self.cap.foreground})
+        frame, t = self.cap.latest()
+        if frame is None:
+            frame = self.cap.wait_frame(after=0.0)
+            t = time.time()
+        walking = self.ctl.keys["w"].down and self._walk_since is not None and t - self._walk_since > 0.3
+        fov_h = math.degrees(2 * math.atan(math.tan(math.radians(self.fov_v) / 2) * frame.shape[1] / frame.shape[0]))
+        touch = self.bump.update(frame, t, walking, dt, self.ctl.turned_deg, fov_h)
+        return Observation(frame=frame, fov_v=self.fov_v, touch_left=touch, touch_right=touch,
+                           info={"状態": self.status, "キー": "".join(k.upper() for k, v in self.ctl.pressed().items() if v),
+                                 "視差": round(self.bump.residual, 3)})
 
     def step(self, action: Action, dt: float) -> Observation:
-        if self.inp.dev.pressed(self.VK_F8):
-            self.paused = not self.paused
-            self.log("⏸ 一時停止" if self.paused else "▶ 再開")
-        active = (not self.paused) and self.cap.foreground
-        if active:
-            self.inp.set("w", action.forward > 0.25)
-            self.inp.set("s", action.forward < -0.25)
-            self.inp.set("mouse", bool(action.attack))
-            if self.inp.down["space"]:
-                self.inp.set("space", False)
-            elif action.jump:
-                self.inp.set("space", True)
-            # 旋回: + = 左 → マウスは左（dx < 0）
-            self.inp.turn(-action.turn * self.mouse_speed * (dt / 0.05))
-        else:
-            self.inp.release_all()
-        # 実時間に合わせる
         now = time.perf_counter()
-        wait = dt - (now - self._t_last)
+        wall_dt = min(0.2, max(0.0, now - self._t_last))
+        if self.dev.hotkey_pressed(self.VK_F8):
+            self.paused = not self.paused
+            self.log("⏸ 一時停止（F8）" if self.paused else "▶ 再開（F8）")
+        active, why = self.game_active()
+        self.status = why
+        if active != self._was_active:
+            self._was_active = active
+            if not active:
+                self.log(f"   ⏹ 入力停止: {why}")
+            else:
+                self.log("   ▶ 操作を再開")
+            self.events.append(why)
+            self.events = self.events[-20:]
+        mono = time.monotonic()
+        if active:
+            self.ctl.apply(action, mono, wall_dt)
+        else:
+            self.ctl.release_all(mono)
+        if self.ctl.keys["w"].down:
+            if self._walk_since is None:
+                self._walk_since = time.time()
+        else:
+            self._walk_since = None
+        # 実時間に合わせる（脳のほうが速いとき）
+        wait = dt - (time.perf_counter() - self._t_last)
         if wait > 0:
             time.sleep(wait)
         self._t_last = time.perf_counter()
         return self._observe(dt)
 
-    def close(self) -> None:
+    def extra_telemetry(self):
+        return {"status": self.status, "events": list(self.events[-8:]),
+                "keys": self.ctl.pressed(), "deg_per_px": round(self.ctl.deg_per_px, 4)}
+
+    def _emergency_release(self) -> None:
         try:
-            self.inp.release_all()
+            self.ctl.release_all(time.monotonic())
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._emergency_release()
+        try:
+            self.cap.close()
         except Exception:
             pass

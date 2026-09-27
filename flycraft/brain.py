@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -47,6 +48,9 @@ except Exception:  # pragma: no cover - 環境依存
 # 動態への影響は無視できる）。静止したニューロンを計算から外して高速化するため。
 REST_V = 5e-3  # [mV]
 REST_G = 1e-3  # [mV]
+# 入力が来なければ、膜電位は今の値から最大でも「g × PSP_PEAK」しか上がらない
+# （tau_m=20, tau_syn=5 のときの PSP の最大値の係数。g=1 のとき t≈9.2 ms で 0.1575）
+PSP_PEAK = 0.1575
 
 
 @dataclass
@@ -89,6 +93,50 @@ class LIFParams:
         return max(0, int(round(self.t_ref / self.dt)))
 
 
+class ThreadTuner:
+    """計算にかかった時間を見ながら numba のスレッド数を選ぶ。
+
+    ゲームと同じ PC で動かすと、空きコアより多いスレッドはかえって遅くなる。
+    最初に候補を順に試して最速のものを選び、その後もときどき前後の数を試し直す。
+    """
+
+    def __init__(self, max_threads: int, trial_ms: float = 1500.0, revisit_ms: float = 30000.0) -> None:
+        cands = [t for t in (1, 2, 3, 4, 6, 8, 12, 16, 24, 32) if t <= max_threads]
+        if max_threads not in cands:
+            cands.append(max_threads)
+        self.cands = cands
+        self.trial_ms = trial_ms
+        self.revisit_ms = revisit_ms
+        self.score = {}  # スレッド数 → 実時間 / 脳の時間
+        self.queue = list(reversed(cands))  # 多い順に試す
+        self.current = self.queue.pop(0)
+        self._acc_wall = 0.0
+        self._acc_sim = 0.0
+        self._since_revisit = 0.0
+
+    def record(self, wall_s: float, sim_ms: float) -> int:
+        self._acc_wall += wall_s
+        self._acc_sim += sim_ms
+        self._since_revisit += sim_ms
+        if self._acc_sim < self.trial_ms:
+            return self.current
+        ratio = self._acc_wall / (self._acc_sim / 1000.0)
+        old = self.score.get(self.current)
+        self.score[self.current] = ratio if old is None else 0.5 * old + 0.5 * ratio
+        self._acc_wall = self._acc_sim = 0.0
+        if not self.queue and self._since_revisit > self.revisit_ms:
+            best = self.best
+            i = self.cands.index(best)
+            self.queue = [self.cands[j] for j in (i - 1, i + 1) if 0 <= j < len(self.cands)]
+            self._since_revisit = 0.0
+        self.current = self.queue.pop(0) if self.queue else self.best
+        return self.current
+
+    @property
+    def best(self) -> int:
+        return min(self.score, key=self.score.get) if self.score else self.current
+
+
 class Brain:
     """コネクトームから作るスパイキング全脳モデル。
 
@@ -109,13 +157,16 @@ class Brain:
         self.p = params or LIFParams()
         if engine == "auto":
             engine = "numba" if HAVE_NUMBA else "numpy"
-        if engine == "numba" and not HAVE_NUMBA:
+        if engine in ("numba", "numba-lazy") and not HAVE_NUMBA:
             raise RuntimeError("numba がインストールされていません（pip install numba）")
-        if engine not in ("numba", "numpy"):
+        if engine not in ("numba", "numba-lazy", "numpy"):
             raise ValueError(f"unknown engine: {engine}")
+        if engine == "numba-lazy" and self.p.adapt_mV != 0.0:
+            engine = "numba"  # 遅延評価版はスパイク頻度適応に未対応
         self.engine = engine
-        if engine == "numba" and threads:
-            _nb.set_num_threads(int(threads))
+        self.max_threads = _nb.config.NUMBA_NUM_THREADS if HAVE_NUMBA else 1
+        self.threads = min(int(threads), self.max_threads) if threads else self.max_threads
+        self._tuner: Optional[ThreadTuner] = None
         self.nchunks = 64 if connectome.n >= 4096 else 1
         self.n = connectome.n
         self.indptr = np.ascontiguousarray(connectome.indptr, dtype=np.int64)
@@ -134,6 +185,12 @@ class Brain:
         self.bias = np.zeros(self.n, dtype=np.float32)  # 定常的な脱分極電流 [mV]
         self.reset()
 
+    def autotune(self, on: bool = True) -> None:
+        """スレッド数の自動調整（numba エンジンのみ）。"""
+        self._tuner = ThreadTuner(self.max_threads) if (on and self.engine == "numba") else None
+        if self._tuner:
+            self.threads = self._tuner.current
+
     # ----------------------------------------------------------------- state
     def reset(self) -> None:
         n, p = self.n, self.p
@@ -147,6 +204,14 @@ class Brain:
         self.buf = np.zeros((self.D, n), dtype=np.float32)  # 遅延つきシナプス入力のリングバッファ
         # 静止状態でないニューロンの印（numba 版はこれが 0 のニューロンを読み飛ばす）
         self.act = np.zeros(n, dtype=np.uint8)
+        # 遅延評価（engine="numba"）用: 最後に状態を更新したステップ、計算中の集合、到着予定の入力の宛先
+        self.tupd = np.zeros(n, dtype=np.int64)
+        self.hot = np.zeros(n, dtype=np.int32)
+        self.is_hot = np.zeros(n, dtype=np.uint8)
+        self.nhot = np.zeros(1, dtype=np.int64)
+        self.touched = np.zeros((self.D, n), dtype=np.int32)
+        self.tn = np.zeros(self.D, dtype=np.int64)
+        self.stamp = np.full(n, -1, dtype=np.int64)
         self.t_ms = 0.0
         self._step = 0
 
@@ -211,7 +276,22 @@ class Brain:
         a, b, c = p.coefficients()
         ev_step, ev_neuron = self._events(nsteps)
         rec_steps = p.tau_rec / p.dt if p.tau_rec > 0 else 1e-9
-        if self.engine == "numba":
+        if self.engine == "numba-lazy":
+            # 閾値に届きうるもの（と定常電流のあるもの）を最初の計算対象にする
+            u = self.v - p.v0
+            cand = np.flatnonzero((self.bias != 0.0) | (self.rc > 0)
+                                  | (p.v0 + np.maximum(u, 0) + PSP_PEAK * np.maximum(self.g, 0) > p.v_th - 1e-4))
+            coef = p.tau_syn / (p.tau_syn - p.tau_m) if abs(p.tau_syn - p.tau_m) > 1e-9 else 0.0
+            _run_lazy(
+                nsteps, self._step, self.v, self.g, self.rc, self.bias, self.xl, self.tl, self.tupd, self.buf,
+                self.touched, self.tn, self.stamp, self.hot, self.is_hot, self.nhot, cand.astype(np.int64),
+                p.delay_steps, self.indptr, self.indices, self.weights, ev_step, ev_neuron, self._silenced,
+                self.std_U, counts, a, b, c, coef, p.v0, p.v_reset, p.v_th, p.ref_steps, rec_steps, PSP_PEAK,
+            )
+            self._sync(self._step + nsteps, a, c, coef)
+        elif self.engine == "numba":
+            _nb.set_num_threads(self.threads)
+            t_start = time.perf_counter()
             # 外部から状態を書き換えた場合にも備えて、静止していないものを印付け
             self.act[(self.bias != 0.0) | (self.v != p.v0) | (self.g != 0.0)] = 1
             _run_numba(
@@ -220,6 +300,8 @@ class Brain:
                 self._silenced, self.std_U, counts, a, b, c, p.v0, p.v_reset, p.v_th,
                 p.ref_steps, p.adapt_decay, p.adapt_mV, rec_steps, self.nchunks,
             )
+            if self._tuner is not None:
+                self.threads = self._tuner.record(time.perf_counter() - t_start, nsteps * p.dt)
         else:
             bounds = np.searchsorted(ev_step, np.arange(nsteps + 1))
             for k in range(nsteps):
@@ -228,6 +310,18 @@ class Brain:
         self._step += nsteps
         self.t_ms += nsteps * p.dt
         return counts
+
+    def _sync(self, step: int, a: float, c: float, coef: float) -> None:
+        """計算対象外だったニューロンの状態を、厳密解で step 時点まで進める。"""
+        n = step - self.tupd
+        m = n > 0
+        if m.any():
+            k = n[m].astype(np.float64)
+            A, C = a ** k, c ** k
+            v, g = self.v[m].astype(np.float64), self.g[m].astype(np.float64)
+            self.v[m] = (self.p.v0 + (v - self.p.v0) * A + g * coef * (C - A)).astype(np.float32)
+            self.g[m] = (g * C).astype(np.float32)
+        self.tupd[:] = step
 
     def _step_numpy(self, step, forced, counts, a, b, c, rec_steps) -> None:
         p = self.p
@@ -371,7 +465,151 @@ if HAVE_NUMBA:
                         out[j] += weights[e] * sx
                         act[j] = 1
 
+    @_nb.njit(cache=True, nogil=True)
+    def _advance(i, k, v, g, tupd, apow, cpow, coef, v0):  # pragma: no cover - JIT
+        n = k - tupd[i]
+        if n > 0:
+            if n < apow.shape[0]:
+                A = apow[n]
+                C = cpow[n]
+            else:
+                A = apow[1] ** n
+                C = cpow[1] ** n
+            vi = v0 + (v[i] - v0) * A + g[i] * coef * (C - A)
+            v[i] = vi
+            g[i] = g[i] * C
+            tupd[i] = k
+
+    @_nb.njit(cache=True, nogil=True)
+    def _run_lazy(nsteps, step0, v, g, rc, bias, xl, tl, tupd, buf, touched, tn, stamp, hot, is_hot, nhot,
+                  cand, dsteps, indptr, indices, weights, ev_step, ev_neuron, silenced, std_u, counts,
+                  a, b, c, coef, v0, vr, vth, ref_steps, rec_steps, peak):  # pragma: no cover - JIT
+        """遅延評価版（単一スレッド）。
+
+        入力が届いたニューロンと、閾値に届きうるニューロン（hot）だけを毎ステップ積分し、
+        それ以外は次に入力が届いたときに厳密解でまとめて進める。どのニューロンも
+        入力が無い間に閾値を超えることはない（v + g × PSP_PEAK < v_th）ことを保証して
+        計算対象から外すので、全ニューロンを毎ステップ積分するのと同じ結果になる。
+        """
+        n = v.shape[0]
+        D = buf.shape[0]
+        forced = np.zeros(n, dtype=np.uint8)
+        spk = np.empty(n, dtype=np.int64)
+        spk_x = np.empty(n, dtype=np.float32)
+        # a^n, c^n の表（べき乗の計算を省く）
+        apow = np.empty(4096)
+        cpow = np.empty(4096)
+        apow[0] = 1.0
+        cpow[0] = 1.0
+        for q in range(1, 4096):
+            apow[q] = apow[q - 1] * a
+            cpow[q] = cpow[q - 1] * c
+        nh = nhot[0]
+        for j in range(cand.shape[0]):
+            i = cand[j]
+            if is_hot[i] == 0:
+                _advance(i, step0, v, g, tupd, apow, cpow, coef, v0)
+                is_hot[i] = 1
+                hot[nh] = i
+                nh += 1
+        ep = 0
+        nev = ev_step.shape[0]
+        for k in range(nsteps):
+            step = step0 + k
+            slot = step % D
+            # 1) この時刻に届く入力
+            for q in range(tn[slot]):
+                i = touched[slot, q]
+                if is_hot[i] == 0:
+                    _advance(i, step, v, g, tupd, apow, cpow, coef, v0)
+                    gi = g[i] + buf[slot, i]
+                    g[i] = gi
+                    buf[slot, i] = 0.0
+                    # この入力を足しても閾値に届かないなら、計算対象に入れずに済ませる
+                    u = v[i] - v0
+                    if u < 0.0:
+                        u = 0.0
+                    gp = gi if gi > 0.0 else 0.0
+                    if v0 + u + gp * peak > vth - 1e-4 or bias[i] != 0.0:
+                        is_hot[i] = 1
+                        hot[nh] = i
+                        nh += 1
+                else:
+                    g[i] += buf[slot, i]
+                    buf[slot, i] = 0.0
+            tn[slot] = 0
+            # 2) 感覚入力（強制スパイク）
+            while ep < nev and ev_step[ep] == k:
+                i = ev_neuron[ep]
+                ep += 1
+                if is_hot[i] == 0:
+                    _advance(i, step, v, g, tupd, apow, cpow, coef, v0)
+                    is_hot[i] = 1
+                    hot[nh] = i
+                    nh += 1
+                forced[i] = 1
+            # 3) 計算対象のニューロンを 1 ステップ積分
+            nspk = 0
+            idx = 0
+            while idx < nh:
+                i = hot[idx]
+                gi = g[i]
+                vi = v[i]
+                bi = bias[i]
+                if rc[i] > 0:
+                    rc[i] -= 1
+                    forced[i] = 0
+                else:
+                    vi = v0 + (vi - v0) * a + gi * b + bi * (1.0 - a)
+                    gi = gi * c
+                    if (vi > vth or forced[i] == 1) and silenced[i] == 0:
+                        vi = vr
+                        gi = 0.0
+                        rc[i] = ref_steps
+                        counts[i] += 1
+                        x = 1.0 - (1.0 - xl[i]) * np.exp(-(step - tl[i]) / rec_steps)
+                        xl[i] = x - std_u[i] * x
+                        tl[i] = step
+                        spk[nspk] = i
+                        spk_x[nspk] = x
+                        nspk += 1
+                    forced[i] = 0
+                    v[i] = vi
+                    g[i] = gi
+                tupd[i] = step + 1
+                keep = rc[i] > 0 or bi != 0.0
+                if not keep:
+                    u = vi - v0
+                    if u < 0.0:
+                        u = 0.0
+                    gp = gi if gi > 0.0 else 0.0
+                    keep = v0 + u + gp * peak > vth - 1e-4
+                if keep:
+                    idx += 1
+                else:
+                    is_hot[i] = 0
+                    nh -= 1
+                    hot[idx] = hot[nh]
+            # 4) スパイクを遅延つきで配る
+            tstep = step + dsteps
+            ts = tstep % D
+            out = buf[ts]
+            for s_ in range(nspk):
+                i = spk[s_]
+                sx = spk_x[s_]
+                for e in range(indptr[i], indptr[i + 1]):
+                    j = indices[e]
+                    out[j] += weights[e] * sx
+                    if stamp[j] != tstep:
+                        stamp[j] = tstep
+                        touched[ts, tn[ts]] = j
+                        tn[ts] += 1
+        nhot[0] = nh
+
 else:  # pragma: no cover
+
+    def _run_lazy(*args):
+        raise RuntimeError("numba unavailable")
 
     def _run_numba(*args):
         raise RuntimeError("numba unavailable")
