@@ -9,7 +9,7 @@ Minecraft 本体が無くても、同じパイプライン（画面 → 複眼 �
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -590,7 +590,6 @@ class SimWorld(Backend):
             ht, hb, hf = _render_nb(self.world, ox, oy, oz, dirs, self.max_dist)
         else:
             ht, hb, hf = _render_py(self.world, ox, oy, oz, dirs, self.max_dist, None, TOP, SIDE)
-        n = dirs.shape[0]
         hitm = np.isfinite(ht)
         # 空
         up = np.clip(dirs[:, 1], 0, 1)[:, None]

@@ -14,8 +14,6 @@ import re
 import threading
 import time
 
-import numpy as np
-
 from flycraft.backends.sim import CACTUS, EYE, FLOWER, JUMP_V, SimWorld
 from flycraft.interface import Action
 

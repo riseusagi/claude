@@ -89,10 +89,10 @@ class ScreenCapture:
     def __init__(self, window: Optional[str] = "Minecraft", region: Optional[str] = None,
                  max_width: int = 256) -> None:
         _win_dpi_aware()
-        try:
-            import mss  # noqa: F401
-        except ImportError as e:  # pragma: no cover - 環境依存
-            raise RuntimeError("画面キャプチャには mss が必要です: pip install mss") from e
+        import importlib.util
+
+        if importlib.util.find_spec("mss") is None:  # pragma: no cover - 環境依存
+            raise RuntimeError("画面キャプチャには mss が必要です: pip install mss")
         self.window = window
         self.region = tuple(int(v) for v in region.split(",")) if region else None
         self.max_width = max_width

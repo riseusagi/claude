@@ -1,7 +1,6 @@
 import json
 import socket
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -123,3 +122,11 @@ def test_dashboard_endpoints():
         assert fly.opto["p9"]
     finally:
         httpd.shutdown()
+
+
+def test_cli_probe_with_toy(capsys):
+    from flycraft.cli import main
+
+    main(["probe", "sugar", "--toy", "--ms", "300", "--seed", "0"])
+    out = capsys.readouterr().out
+    assert "feed_both" in out and "発火したニューロン" in out

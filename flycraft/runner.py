@@ -91,6 +91,8 @@ class Session:
         return self.action
 
     def _run(self) -> None:
+        with self._lock:
+            self._snapshot = {"tick": 0, "backend": self.backend.name, "status": "ゲームへの接続を待っています…"}
         try:
             self.obs = self.backend.reset()
         except Exception as e:  # pragma: no cover - 接続エラーなど
@@ -133,7 +135,7 @@ class Session:
     def _publish(self) -> None:
         fly = self.fly
         snap: Dict[str, Any] = {"tick": self.tick, "paused": self.paused, "loop_hz": round(self.loop_hz, 1),
-                                "backend": self.backend.name, "error": self.error}
+                                "backend": self.backend.name, "error": self.error, "status": ""}
         snap.update(fly.telemetry())
         obs = self.obs
         if obs is not None:

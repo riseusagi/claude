@@ -91,6 +91,7 @@
     <span class="chip">スパイク <b id="st-sp">0</b> /tick</span>
     <span class="chip">発火中 <b id="st-act">0</b> 個</span>
   </div>
+  <div class="note" id="st-status" style="margin:0"></div>
   <div class="err" id="st-err"></div>
 </header>
 <main>
@@ -214,7 +215,7 @@ async function loadBrain() {
 }
 
 function drawBrain(s) {
-  if (!layout) return;
+  if (!layout || !s.act_idx) return;
   const ctx = $('brain').getContext('2d');
   const img = new ImageData(new Uint8ClampedArray(baseImg.data), layout.w, layout.h);
   const d = img.data, w = layout.w;
@@ -323,6 +324,7 @@ function render(s) {
   $('st-sp').textContent = (s.spikes ?? 0).toLocaleString();
   $('st-act').textContent = (s.active ?? 0).toLocaleString();
   $('st-err').textContent = s.error || '';
+  $('st-status').textContent = s.status || '';
   if (s.frame) drawRGB($('game'), s.frame.w, s.frame.h, s.frame.rgb);
   if (s.eye) { drawEye(s.eye); if (s.motion) drawMotion(s.motion, s.eye.w, s.eye.h); }
   if (s.info) {
@@ -385,6 +387,7 @@ async function loop() {
   try {
     const s = await (await fetch('/api/state')).json();
     if (s.tick !== undefined) render(s);
+    $('st-err').textContent = s.error || '';
     if (++tickMap % 20 === 0 && minimapImg) loadMap();
   } catch (e) { $('st-err').textContent = '接続が切れました'; }
   setTimeout(loop, 100);

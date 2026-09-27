@@ -1,9 +1,8 @@
-import numpy as np
 import pytest
 
 from flycraft.backends.sim import SimWorld
 from flycraft.fly import Fly, FlyConfig
-from flycraft.interface import Action, Observation
+from flycraft.interface import Observation
 from flycraft.retinotopy import infer
 from flycraft.runner import Session
 from flycraft.toy import build_toy

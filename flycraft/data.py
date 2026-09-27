@@ -177,7 +177,6 @@ def build_from_raw(raw_dir: Path) -> Connectome:
     raw_dir = Path(raw_dir)
     comp = pd.read_csv(raw_dir / "Completeness_783.csv", index_col=0)
     root_ids = comp.index.to_numpy(dtype=np.int64)
-    n = len(root_ids)
 
     cols = ["Presynaptic_Index", "Postsynaptic_Index", "Excitatory x Connectivity"]
     edges = pd.read_parquet(raw_dir / "Connectivity_783.parquet", columns=cols)

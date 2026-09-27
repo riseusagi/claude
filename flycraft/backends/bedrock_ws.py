@@ -116,7 +116,7 @@ class BedrockBridge:
         asyncio.set_event_loop(self.loop)
         try:
             import websockets
-        except ImportError as e:  # pragma: no cover
+        except ImportError:  # pragma: no cover
             self._error = RuntimeError("websockets が必要です: pip install websockets")
             self._ready.set()
             return
@@ -360,7 +360,7 @@ class BedrockWSBackend(Backend):
             b.command("execute as @s at @s anchored eyes positioned ^ ^ ^1.5 unless block ~ ~ ~ bedrock "
                       "unless block ~ ~ ~ air run setblock ~ ~ ~ air destroy")
             b.command("execute as @s at @s anchored eyes positioned ^ ^ ^1.5 run "
-                      "damage @e[r=1.5,c=1,type=!player] 2 entity_attack entity @s")
+                      "damage @e[r=1.5,c=1,type=!player,type=!item] 2 entity_attack entity @s")
 
     def _query(self) -> None:
         b = self.bridge
