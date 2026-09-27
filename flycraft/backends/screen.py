@@ -188,6 +188,14 @@ def win_is_foreground(hwnd) -> bool:
     return bool(fg) and user32.GetAncestor(fg, GA_ROOTOWNER) == user32.GetAncestor(hwnd, GA_ROOTOWNER)
 
 
+def win_mouse_acceleration() -> bool:
+    """「ポインターの精度を高める」（マウス加速）が有効か。小さな移動ほど縮められて旋回が鈍る。"""
+    arr = (ctypes.c_int * 3)()
+    if not ctypes.windll.user32.SystemParametersInfoW(0x0003, 0, arr, 0):  # SPI_GETMOUSE
+        return False
+    return arr[2] != 0
+
+
 def win_cursor_hidden() -> bool:
     CURSORINFO = win_input_structs()[3]
     ci = CURSORINFO()
@@ -492,8 +500,8 @@ class KeyPolicy:
     jump_hold: float = 0.12  # Space を押している時間 [s]
     jump_cooldown: float = 0.6  # ジャンプの間隔（2 度押しで飛行モードにならないように）[s]
     attack_release: float = 0.3  # 噛む指令が消えてから左クリックを離すまで [s]
-    turn_deg_s: float = 150.0  # 旋回指令 1.0 のときの回転速度 [度/秒]
-    max_turn_step: float = 30.0  # 1 回で回す角度の上限 [度]
+    turn_deg_s: float = 360.0  # 旋回指令 1.0 のときの回転速度 [度/秒]（ハエの急旋回は 500°/秒を超える）
+    max_turn_step: float = 60.0  # 1 回で回す角度の上限 [度]
 
 
 class _Key:
@@ -522,6 +530,7 @@ class Controller:
         self._last_attack = -1e9
         self._mx = 0.0
         self.turned_deg = 0.0
+        self.px_total = 0  # 送ったマウス移動量の合計 [px]
 
     def _hold(self, key: str, want: bool, now: float) -> None:
         k, p = self.keys[key], self.p
@@ -565,6 +574,7 @@ class Controller:
         if step:
             self._mx -= step
             self.dev.move(step, 0)
+            self.px_total += abs(step)
             self.turned_deg += -step * self.deg_per_px
 
     def release_all(self, now: float) -> None:
@@ -716,6 +726,8 @@ class ScreenBackend(Backend):
         self._t_last = time.perf_counter()
         self._walk_since = None
         self._was_active = None
+        self.turn_rate = 0.0  # 実際に回している速さ [度/秒]
+        self.px_rate = 0.0  # 送っているマウス移動量 [px/秒]
         atexit.register(self._emergency_release)
 
     @property
@@ -753,6 +765,14 @@ class ScreenBackend(Backend):
             self.log("   ⚠ Minecraft のウィンドウが見つかりません。起動しているか、--window でタイトルを指定してください")
         self.log("   ・Minecraft を最前面にしてゲーム画面（メニューが閉じた状態）にすると操作が始まります")
         self.log("   ・F8 で一時停止/再開、ターミナルで Ctrl+C で終了")
+        if IS_WIN:
+            try:
+                if win_mouse_acceleration():
+                    self.log("   ⚠ Windows の「ポインターの精度を高める」が有効です。小さなマウス移動が縮められて"
+                             "旋回が鈍くなることがあります（設定 > Bluetooth とデバイス > マウス > マウスの追加設定 > "
+                             "ポインター オプション でオフにするのがおすすめ）")
+            except Exception:
+                pass
         for k in range(int(self.countdown), 0, -1):
             self.log(f"   {k}…")
             time.sleep(1.0)
@@ -785,12 +805,10 @@ class ScreenBackend(Backend):
             h, w = g.shape
             return g[int(h * 0.2):int(h * 0.8), int(w * 0.25):int(w * 0.75)], W / g.shape[1]
 
-        results = []
-        n = int(np.clip(round(8.0 / max(self.ctl.deg_per_px, 1e-3)), 10, 400))  # 約 8° 回す
-        for sign in (1, -1, 1, -1):
+        def turn_and_measure(n: int, sign: int):
+            """マウスを横に n px 動かし、画面の回転角 [度] を測る（測れなければ None）。"""
             a, k = center(self.cap.wait_frame(after=time.time() + 0.05))
-            # 実際のプレイと同じく小刻みに動かす（マウス加速が効く環境でも同じ条件で測る）
-            chunk = max(1, int(round(8.0 / max(self.ctl.deg_per_px, 1e-3) / 6)))
+            chunk = max(1, n // 6)  # 実際のプレイと同じく小刻みに動かす
             left = n
             while left > 0:
                 step = min(chunk, left)
@@ -799,14 +817,31 @@ class ScreenBackend(Backend):
                 time.sleep(0.02)
             b, _ = center(self.cap.wait_frame(after=time.time() + 0.25))
             dx, dy, peak = phase_shift(a, b)
-            if peak < 0.05:
-                continue
             ang = math.degrees(math.atan(abs(dx) * k / focal))
-            if (dx < 0) == (sign > 0) and ang > 0.3:  # 右を向けば画面は左へずれる
+            if peak < 0.05 or (dx < 0) != (sign > 0):  # 右を向けば画面は左へずれる
+                return None
+            return ang
+
+        # 1) 小さく動かして大まかな感度をつかむ（感度が高くても低くても測れるように）
+        guess = None
+        for n in (12, 48, 192, 768, 3072):
+            ang = turn_and_measure(n, 1)
+            turn_and_measure(n, -1)
+            if ang is not None and ang >= 1.5:
+                guess = ang / n
+                break
+        if guess is None:
+            return None
+        # 2) 約 8° 回る量で左右 2 往復して精密に測る
+        n = int(np.clip(round(8.0 / guess), 4, 20000))
+        results = []
+        for sign in (1, -1, 1, -1):
+            ang = turn_and_measure(n, sign)
+            if ang is not None and ang > 0.3:
                 results.append(ang / n)
         if len(results) >= 2:
             dpp = float(np.median(results))
-            if 0.003 < dpp < 5.0:
+            if 0.0005 < dpp < 10.0:
                 return dpp
         return None
 
@@ -874,10 +909,17 @@ class ScreenBackend(Backend):
             self.events.append(why)
             self.events = self.events[-20:]
         mono = time.monotonic()
+        before = self.ctl.turned_deg
+        px_before = self.ctl.px_total
         if active:
             self.ctl.apply(action, mono, wall_dt)
         else:
             self.ctl.release_all(mono)
+        if wall_dt > 0:
+            inst = abs(self.ctl.turned_deg - before) / wall_dt
+            k = min(1.0, wall_dt / 1.0)  # 約 1 秒の平均
+            self.turn_rate += k * (inst - self.turn_rate)
+            self.px_rate += k * ((self.ctl.px_total - px_before) / wall_dt - self.px_rate)
         if self.ctl.keys["w"].down:
             if self._walk_since is None:
                 self._walk_since = time.time()
@@ -892,7 +934,9 @@ class ScreenBackend(Backend):
 
     def extra_telemetry(self):
         return {"status": self.status, "events": list(self.events[-8:]),
-                "keys": self.ctl.pressed(), "deg_per_px": round(self.ctl.deg_per_px, 4)}
+                "keys": self.ctl.pressed(), "deg_per_px": round(self.ctl.deg_per_px, 4),
+                "turn_deg_s": round(self.ctl.p.turn_deg_s), "turn_rate": round(self.turn_rate),
+                "mouse_px_s": round(self.px_rate)}
 
     def _emergency_release(self) -> None:
         try:

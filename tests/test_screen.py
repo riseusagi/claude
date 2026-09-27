@@ -239,3 +239,28 @@ def test_windows_struct_sizes():
         assert ctypes.sizeof(CURSORINFO) == 24
     else:
         assert ctypes.sizeof(INPUT) == 28
+
+
+def test_calibration_handles_low_and_high_mouse_sensitivity(monkeypatch):
+    """マウス感度が低くても高くても（1 px = 0.01〜1.5°）較正できる。"""
+    import test_screen as T
+
+    for dpp in (0.01, 0.6, 1.5):
+        monkeypatch.setattr(T, "DPP", dpp)
+        fake = SimScreen(seed=1)
+        be = make_backend(fake, pitch=8.0)
+        be.reset()
+        assert abs(be.ctl.deg_per_px - dpp) / dpp < 0.05
+        assert abs(fake.world.player.pitch - (-8.0)) < 3.0
+
+
+def test_default_turn_is_fast_enough():
+    """旋回指令 0.25（脳でよく出る大きさ）で 90°/秒、1 px = 0.15° なら 1 秒で 600 px 動かす。"""
+    dev = _NullInput()
+    c = Controller(dev, KeyPolicy(), deg_per_px=0.15)
+    t = 0.0
+    for _ in range(20):
+        c.apply(Action(turn=-0.25), t, 0.05)
+        t += 0.05
+    px = sum(e[1] for e in dev.log if e[0] == "move")
+    assert px == 600

@@ -122,9 +122,12 @@ def run_session(args, backend, fly) -> None:
             if time.time() - last > 5:
                 last = time.time()
                 a = session.action
+                ex = backend.extra_telemetry()
+                tr = ex.get("turn_rate")
                 _log(f"  t={fly.brain.t_ms / 1000:6.1f}s  速度 {fly.realtime_factor():.2f}×  "
-                     f"前進 {a.forward:+.2f} 旋回 {a.turn:+.2f}  ジャンプ {fly.stats['jumps']}  "
-                     f"噛む {fly.stats['bites']}  空腹 {fly.hunger:.2f}")
+                     f"前進 {a.forward:+.2f} 旋回 {a.turn:+.2f}"
+                     + (f"（実際 {tr}°/秒・マウス {ex.get('mouse_px_s')} px/秒）" if tr is not None else "")
+                     + f"  ジャンプ {fly.stats['jumps']}  噛む {fly.stats['bites']}  空腹 {fly.hunger:.2f}")
     finally:
         session.stop()
         if httpd:
@@ -289,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     _run_opts(p)
     p.add_argument("--window", default="Minecraft", help="対象ウィンドウ名（部分一致）")
     p.add_argument("--region", help="キャプチャ範囲 x,y,w,h（ウィンドウが見つからない場合）")
-    p.add_argument("--turn-speed", type=float, default=150.0, help="旋回指令 1.0 のときの回転速度 [度/秒]")
+    p.add_argument("--turn-speed", type=float, default=360.0, help="旋回指令 1.0 のときの回転速度 [度/秒]（ダッシュボードでも変更可）")
     p.add_argument("--deg-per-px", type=float, help="マウス 1 px あたりの回転角 [度]（指定すると自動較正しない）")
     p.add_argument("--no-calibrate", action="store_true", help="起動時のマウス較正をしない")
     p.add_argument("--pitch", type=float, default=8.0, help="較正後に視線を水平から何度下げるか（負の値でそのまま）")

@@ -51,7 +51,7 @@ LABELS = {
 class MotorParams:
     tau: float = 0.15  # 発火率の平滑化 [s]
     walk_full_hz: float = 25.0  # この発火率で全速前進
-    turn_full_hz: float = 15.0  # 左右差がこの値で最大旋回
+    turn_full_hz: float = 10.0  # 左右差がこの値で最大旋回
     backward_gain: float = 1.5
     feed_hz: float = 4.0  # MN9 がこれを超えたら噛む
     escape_hz: float = 60.0  # 逃避系の重み付き発火率がこれを超えたら跳ぶ

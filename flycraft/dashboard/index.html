@@ -149,6 +149,8 @@
     <div class="opto" id="opto"></div>
     <div class="ctrl">
       <label>空腹度 <input type="range" id="hunger-in" min="0" max="1" step="0.05"></label>
+      <label id="turn-box" style="display:none">旋回の速さ <input type="range" id="turn-in" min="60" max="1080" step="30">
+        <b id="turn-val">-</b></label>
       <button id="pause">⏸ 一時停止</button>
       <button id="reset-brain">脳をリセット</button>
       <button id="reset-world">世界をリセット</button>
@@ -361,6 +363,11 @@ function render(s) {
   fr.querySelector('.bar > div').style.width = Math.min(100, (m.feed_both || 0) * 5) + '%';
   fr.querySelector('.val').textContent = (m.feed_both || 0).toFixed(1);
   $('hunger').textContent = (s.hunger ?? 0).toFixed(2);
+  if (s.turn_deg_s !== undefined) {
+    $('turn-box').style.display = '';
+    if (document.activeElement !== $('turn-in')) $('turn-in').value = s.turn_deg_s;
+    $('turn-val').textContent = `最大 ${s.turn_deg_s}°/秒（今 ${s.turn_rate ?? 0}°/秒・マウス ${s.mouse_px_s ?? 0} px/秒）`;
+  }
   const rf = s.reflex || {};
   $('reflex').textContent = !rf.enabled ? '無効' : (rf.active ? '⚠ 作動中（障害物回避）' : `待機（${rf.count ?? 0} 回作動）`);
   $('reflex').style.color = rf.active ? 'var(--accent)' : '';
@@ -401,6 +408,7 @@ $('pause').onclick = () => post({type: 'pause', value: !paused});
 $('reset-brain').onclick = () => post({type: 'reset_brain'});
 $('reset-world').onclick = () => post({type: 'reset_world'});
 $('hunger-in').onchange = (e) => post({type: 'hunger', value: +e.target.value});
+$('turn-in').onchange = (e) => post({type: 'turn_speed', value: +e.target.value});
 loadBrain().then(loadMap).then(loop);
 </script>
 </body>
